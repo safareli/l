@@ -182,19 +182,19 @@
   # ============================================================================
   # Systemd user services
   # ============================================================================
-                                                                                                                          
-  # # Check status                                                                                                                      
-  # systemctl --user status opencode-web                                                                                                
-                                                                                                                                      
-  # # Start/stop/restart                                                                                                                
-  # systemctl --user start opencode-web                                                                                                 
-  # systemctl --user stop opencode-web                                                                                                  
-  # systemctl --user restart opencode-web                                                                                               
-                                                                                                                                      
-  # # View logs                                                                                                                         
-  # journalctl --user -u opencode-web -f                                                                                                
-                                          
-  systemd.user.services.opencode-web = {
+
+  # # Check status
+  # systemctl --user status opencode-web
+
+  # # Start/stop/restart
+  # systemctl --user start opencode-web 
+  # systemctl --user stop opencode-web
+  # systemctl --user restart opencode-web 
+
+  # # View logs 
+  # journalctl --user -u opencode-web -f
+
+systemd.user.services.opencode-web = {
     Unit = {
       Description = "OpenCode Web UI";
       After = [ "network.target" ];
