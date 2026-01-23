@@ -108,23 +108,53 @@
   # ============================================================================
   programs.git = {
     enable = true;
-    # Uncomment and customize:
-    # userName = "Your Name";
-    # userEmail = "your.email@example.com";
 
     settings = {
+      user.name = "Irakli Safareli";
+      user.email = "i.safareli@gmail.com";
       init.defaultBranch = "main";
       push.autoSetupRemote = true;
+      push.default = "current";
       pull.rebase = true;
 
+      core = {
+        autocrlf = "input";
+        eol = "lf";
+        trustctime = false;
+        ignorecase = false;
+        # editor = "cursor --wait";
+      };
+
       alias = {
-        st = "status";
-        co = "checkout";
-        br = "branch";
-        ci = "commit";
         lg = "log --oneline --graph --decorate";
+        fm = "fetch origin main:main";
+        f = "fetch --all";
+        r = "rebase origin/main";
+        m = "merge origin/main";
+        p = "push";
+        s = "status";
+        c = "checkout";
+        cp = "cherry-pick";
+        cm = "checkout --detach main";
+        todo = "!f() { git diff main... --unified=0 | grep '^+.*TODO'; }; f";
+        cc = "commit";
+        cn = "commit -n";
+        ca = "commit --amend";
+        n = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1; }; f'';
+        nm = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1 main; }; f'';
+        skipped = "!f() { git ls-files -v | grep ^S; }; f";
+        skip = "update-index --skip-worktree";
+        unskip = "update-index --no-skip-worktree";
+        br = "branch --sort=-committerdate";
+        up = "!git branch --set-upstream-to=$(git remote)/$(git branch --show-current) $(git branch --show-current)";
+        fixup = ''!f() { TARGET=$(git rev-parse "$1"); git commit --fixup=$TARGET ''${@:2} && EDITOR=true git rebase -i --autostash --autosquash $TARGET^; }; f'';
+        fixupn = ''!f() { TARGET=$(git rev-parse "$1"); git commit -n --fixup=$TARGET ''${@:2} && EDITOR=true git rebase -i --autostash --autosquash $TARGET^; }; f'';
       };
     };
+
+    # ignores = [
+    #   ".DS_Store"
+    # ];
   };
 
   # ============================================================================
