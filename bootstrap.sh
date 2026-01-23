@@ -28,4 +28,7 @@ git clone https://github.com/safareli/l.git ~/.config/home-manager
 echo "==> Running home-manager switch..."
 nix run home-manager/master -- switch --flake ~/.config/home-manager
 
+echo "==> Enabling linger for user services..."
+sudo loginctl enable-linger "$USER"
+
 echo "==> Done! Start a new shell or run: exec zsh"

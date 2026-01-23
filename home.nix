@@ -187,4 +187,36 @@
     # Install/update global npm packages
     ${pkgs.nodejs_25}/bin/npm install -g opencode-ai
   '';
+
+  # ============================================================================
+  # Systemd user services
+  # ============================================================================
+                                                                                                                          
+  # # Check status                                                                                                                      
+  # systemctl --user status opencode-web                                                                                                
+                                                                                                                                      
+  # # Start/stop/restart                                                                                                                
+  # systemctl --user start opencode-web                                                                                                 
+  # systemctl --user stop opencode-web                                                                                                  
+  # systemctl --user restart opencode-web                                                                                               
+                                                                                                                                      
+  # # View logs                                                                                                                         
+  # journalctl --user -u opencode-web -f                                                                                                
+                                          
+  systemd.user.services.opencode-web = {
+    Unit = {
+      Description = "OpenCode Web UI";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Environment = "PATH=${pkgs.nodejs_25}/bin";
+      EnvironmentFile = "%h/.config/home-manager/.env";
+      ExecStart = "%h/.npm-global/bin/opencode web --port 6767 --hostname=0.0.0.0";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
 }
