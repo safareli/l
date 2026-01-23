@@ -7,12 +7,20 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    claude-code = {
+      url = "github:sadjow/claude-code-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { nixpkgs, home-manager, ... }:
+  outputs = { nixpkgs, home-manager, claude-code, ... }:
     let
       system = "aarch64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ claude-code.overlays.default ];
+        config.allowUnfree = true;
+      };
     in
     {
       homeConfigurations."safareli" = home-manager.lib.homeManagerConfiguration {
