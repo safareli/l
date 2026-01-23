@@ -11,14 +11,23 @@
       url = "github:sadjow/claude-code-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    opencode = {
+      url = "github:anomalyco/opencode?ref=v1.1.34";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { nixpkgs, home-manager, claude-code, ... }:
+  outputs = { nixpkgs, home-manager, claude-code, opencode, ... }:
     let
       system = "aarch64-linux";
       pkgs = import nixpkgs {
         inherit system;
-        overlays = [ claude-code.overlays.default ];
+        overlays = [
+          claude-code.overlays.default
+          (final: prev: {
+            opencode = opencode.packages.${system}.default;
+          })
+        ];
         config.allowUnfree = true;
       };
     in

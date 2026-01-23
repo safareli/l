@@ -21,6 +21,7 @@
 
     # AI tools
     claude-code-bun    # from github:sadjow/claude-code-nix (faster, uses Bun)
+    opencode           # from github:anomalyco/opencode (pinned to v1.1.34)
 
     # CLI tools
     jq
@@ -177,16 +178,6 @@
     "terminal.integrated.defaultProfile.linux" = "zsh";
   };
 
-  # ============================================================================
-  # npm global packages (installed on each home-manager switch)
-  # ============================================================================
-  home.activation.npmGlobalPackages = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    export PATH="${pkgs.nodejs_25}/bin:$HOME/.npm-global/bin:$PATH"
-    export NPM_CONFIG_PREFIX="$HOME/.npm-global"
-
-    # Install/update global npm packages
-    ${pkgs.nodejs_25}/bin/npm install -g opencode-ai
-  '';
 
   # ============================================================================
   # Systemd user services
@@ -209,9 +200,8 @@
       After = [ "network.target" ];
     };
     Service = {
-      Environment = "PATH=${pkgs.nodejs_25}/bin";
       EnvironmentFile = "%h/.config/home-manager/.env";
-      ExecStart = "%h/.npm-global/bin/opencode web --port 6767 --hostname=0.0.0.0";
+      ExecStart = "${pkgs.opencode}/bin/opencode web --port 6767 --hostname=0.0.0.0";
       Restart = "on-failure";
       RestartSec = 5;
     };
