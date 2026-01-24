@@ -22,6 +22,7 @@
     # AI tools
     claude-code-bun    # from github:sadjow/claude-code-nix (faster, uses Bun)
     opencode           # from github:anomalyco/opencode (pinned to v1.1.34)
+    pi                 # from github:badlogic/pi-mono (pinned to v0.49.3)
 
     # CLI tools
     jq
