@@ -25,6 +25,7 @@
     pi                 # from github:badlogic/pi-mono (pinned to v0.49.3)
 
     # CLI tools
+    tmux
     jq
     lazygit
     fzf
