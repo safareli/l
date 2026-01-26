@@ -211,4 +211,20 @@ systemd.user.services.opencode-web = {
       WantedBy = [ "default.target" ];
     };
   };
+
+  systemd.user.services.tts-server = {
+    Unit = {
+      Description = "Piper TTS Server";
+      After = [ "network.target" ];
+    };
+    Service = {
+      WorkingDirectory = "%h/dev/tts";
+      ExecStart = "%h/dev/tts/run_server.sh --host 0.0.0.0 --port 6768";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
 }
