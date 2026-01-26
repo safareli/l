@@ -183,6 +183,15 @@
     "terminal.integrated.defaultProfile.linux" = "zsh";
   };
 
+  # ============================================================================
+  # AI Agent Skills (shared across all coding agents)
+  # ============================================================================
+  # Skills are stored in ~/.config/home-manager/skills/
+  # and symlinked to each agent's expected location
+  home.file.".pi/agent/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".claude/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".codex/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+
 
   # ============================================================================
   # Systemd user services
