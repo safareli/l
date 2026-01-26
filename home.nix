@@ -194,6 +194,11 @@
 
 
   # ============================================================================
+  # Portal - Local services index page
+  # ============================================================================
+  home.file.".local/share/portal/index.html".source = ./portal.html;
+
+  # ============================================================================
   # Systemd user services
   # ============================================================================
 
@@ -246,7 +251,7 @@ systemd.user.services.opencode-web = {
       After = [ "network.target" ];
     };
     Service = {
-      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/dev/portal --port 6766 --addr 0.0.0.0";
+      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/portal --port 1111 --addr 0.0.0.0";
       Restart = "on-failure";
       RestartSec = 5;
     };

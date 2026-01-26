@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>ralf.orb.local</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 60px 20px;
+        background: #fafafa;
+        color: #333;
+      }
+      h1 {
+        font-weight: 300;
+        font-size: 2.5em;
+        margin-bottom: 0.5em;
+      }
+      .subtitle {
+        color: #888;
+        margin-bottom: 2em;
+      }
+      .services {
+        list-style: none;
+        padding: 0;
+      }
+      .services li {
+        margin: 0.8em 0;
+      }
+      .services a {
+        display: block;
+        padding: 1em 1.2em;
+        background: white;
+        border-radius: 8px;
+        text-decoration: none;
+        color: #333;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        transition:
+          box-shadow 0.2s,
+          transform 0.2s;
+      }
+      .services a:hover {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        transform: translateY(-2px);
+      }
+      .service-name {
+        font-weight: 500;
+      }
+      .service-port {
+        color: #888;
+        font-size: 0.9em;
+        float: right;
+      }
+      .service-desc {
+        color: #666;
+        font-size: 0.85em;
+        margin-top: 0.3em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🖥️ ralf</h1>
+    <p class="subtitle">Local development services</p>
+
+    <ul class="services">
+      <li>
+        <a class="service-link" data-port="6767">
+          <span class="service-name">OpenCode Web</span>
+          <span class="service-port">:6767</span>
+          <div class="service-desc">AI coding assistant web UI</div>
+        </a>
+      </li>
+      <li>
+        <a class="service-link" data-port="6768">
+          <span class="service-name">Piper TTS</span>
+          <span class="service-port">:6768</span>
+          <div class="service-desc">Text-to-speech API (Georgian, English)</div>
+        </a>
+      </li>
+      <li>
+        <a class="service-link" data-port="6769">
+          <span class="service-name">ttyd</span>
+          <span class="service-port">:6769</span>
+          <div class="service-desc">Web-based terminal (zsh)</div>
+        </a>
+      </li>
+    </ul>
+    <script>
+      // Dynamically set hrefs using current hostname so links work from any network
+      document.querySelectorAll('.service-link').forEach(link => {
+        const port = link.dataset.port;
+        link.href = `http://${location.hostname}:${port}`;
+      });
+    </script>
+  </body>
+</html>
