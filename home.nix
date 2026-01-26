@@ -254,4 +254,19 @@ systemd.user.services.opencode-web = {
       WantedBy = [ "default.target" ];
     };
   };
+
+  systemd.user.services.ttyd = {
+    Unit = {
+      Description = "ttyd - Web terminal";
+      After = [ "network.target" ];
+    };
+    Service = {
+      ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 ${pkgs.zsh}/bin/zsh";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
 }
