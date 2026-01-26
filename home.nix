@@ -41,6 +41,9 @@
     # Process management
     process-compose    # docker-compose for processes
 
+    # Web servers
+    darkhttpd          # tiny static file server
+
     # JSON viewers
     # otree            # Not in nixpkgs - install via: cargo install otree
 
@@ -220,6 +223,21 @@ systemd.user.services.opencode-web = {
     Service = {
       WorkingDirectory = "%h/dev/tts";
       ExecStart = "%h/dev/tts/run_server.sh --host 0.0.0.0 --port 6768";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  systemd.user.services.portal = {
+    Unit = {
+      Description = "Portal - Local services index";
+      After = [ "network.target" ];
+    };
+    Service = {
+      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/dev/portal --port 6766 --addr 0.0.0.0";
       Restart = "on-failure";
       RestartSec = 5;
     };
