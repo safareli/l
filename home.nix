@@ -266,7 +266,7 @@ systemd.user.services.opencode-web = {
       After = [ "network.target" ];
     };
     Service = {
-      ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 ${pkgs.zsh}/bin/zsh";
+      ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 -t scrollback=100000 ${pkgs.zsh}/bin/zsh";
       Restart = "on-failure";
       RestartSec = 5;
     };
