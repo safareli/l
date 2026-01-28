@@ -12,11 +12,14 @@ show_help() {
 Git worktree management tool
 
 Usage:
-  gw n <name>              Create new worktree with branch $USER/YYYY-MM-DD-<name>
+  gw n <name>              Create new worktree with branch $GW_USER/YYYY-MM-DD-<name>
   gw n <name> "<prompt>"   Create worktree and launch AI agent with prompt
   gw d [name]              Delete current worktree (or named one)
   gw l                     List all worktrees
   gw h, --help             Show this help
+
+Environment:
+  GW_USER                  Username prefix for new branches (default: $USER)
 
 Examples:
   gw n feature-auth
@@ -86,7 +89,7 @@ cmd_new() {
         # Create new branch with date prefix
         local with_date
         with_date="$(date +%Y-%m-%d)-$name"
-        branch_name="$USER/$with_date"
+        branch_name="${GW_USER:-$USER}/$with_date"
     fi
 
     # Create worktree directory name (use branch name, replace / with -)
