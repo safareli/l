@@ -79,6 +79,9 @@ in
       # Custom prompt with user@host prefix
       PROMPT="%F{green}%n@%m%f $PROMPT"
 
+      # Git worktree username prefix
+      export GW_USER="irakli"
+
       # PATH additions
       export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
