@@ -86,6 +86,26 @@ in
         source "$(fzf-share)/key-bindings.zsh"
         source "$(fzf-share)/completion.zsh"
       fi
+
+      # gw wrapper function to handle cd after worktree operations
+      gw() {
+        local output
+        output=$("$HOME/.local/bin/gw" "$@")
+        local exit_code=$?
+        
+        # Check if output contains cd instruction
+        local cd_path=$(echo "$output" | grep "^GW_CD:" | cut -d: -f2-)
+        
+        # Print output without the GW_CD line
+        echo "$output" | grep -v "^GW_CD:"
+        
+        # If there's a cd path, change to it
+        if [ -n "$cd_path" ]; then
+          cd "$cd_path"
+        fi
+        
+        return $exit_code
+      }
     '';
 
     shellAliases = {
@@ -194,6 +214,14 @@ in
   home.file.".pi/agent/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
   home.file.".claude/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
   home.file.".codex/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+
+  # ============================================================================
+  # Custom Scripts
+  # ============================================================================
+  home.file.".local/bin/gw" = {
+    source = ./scripts/gw;
+    executable = true;
+  };
 
 
   # ============================================================================
