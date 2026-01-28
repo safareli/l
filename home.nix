@@ -27,6 +27,7 @@
     # CLI tools
     tmux
     jq
+    gh                 # GitHub CLI
     lazygit
     fzf
     ripgrep
