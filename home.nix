@@ -222,7 +222,7 @@ systemd.user.services.opencode-web = {
       After = [ "network.target" ];
     };
     Service = {
-      EnvironmentFile = "%h/.config/home-manager/.env";
+      EnvironmentFile = "-%h/.config/home-manager/.env";
       ExecStart = "${pkgs.opencode}/bin/opencode web --port 6767 --hostname=0.0.0.0";
       Restart = "on-failure";
       RestartSec = 5;

@@ -10,6 +10,7 @@ PROFILE_CONFIG="$PROFILE_DIR/colima.yaml"
 case "$1" in
   setup)
     echo "=== SETUP VM CONFIG ==="
+    "$0" down
     mkdir -p "$PROFILE_DIR"
     if [[ -e "$PROFILE_CONFIG" ]]; then
       read -p "Config '$PROFILE_CONFIG' already exists. Overwrite? [y/N] " confirm
@@ -20,6 +21,8 @@ case "$1" in
     fi
     cp "$CONFIG" "$PROFILE_CONFIG"
     echo "Config copied to $PROFILE_CONFIG"
+    "$0" up
+    "$0" provision
     ;;
   up)
     echo "=== STARTING VM ==="
@@ -124,6 +127,9 @@ SYSTEM_EOF
       touch ~/.provision-user-done
       echo "==> User provisioning complete"
 USER_EOF
+    "$0" down
+    "$0" up
+    "$0" health
     ;;
   *)
     echo "Usage: vm [setup|up|down|health|rm|provision]"
