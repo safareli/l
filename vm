@@ -112,16 +112,11 @@ SYSTEM_EOF
         git clone https://github.com/safareli/l.git ~/.config/home-manager
       fi
 
-      echo "==> Creating home-manager.local.nix..."
-      cat > ~/.config/home-manager.local.nix <<LOCALEOF
-{
-  username = "$USER";
-  homeDirectory = "$HOME";
-}
-LOCALEOF
-
       echo "==> Running home-manager switch..."
       nix run home-manager/master -- switch -b bak --flake ~/.config/home-manager
+
+      echo "==> Setting zsh as default shell..."
+      sudo chsh -s "$(which zsh)" "$USER"
 
       echo "==> Enabling linger for user services..."
       sudo loginctl enable-linger "$USER"

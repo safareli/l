@@ -1,11 +1,10 @@
 { config, pkgs, lib, ... }:
 
 let
-  local = import ~/.config/home-manager.local.nix;
+  local = { username = "safareli"; homeDirectory = "/home/safareli.linux"; };
 in
 {
   # Home Manager needs a bit of information about you and the paths it should manage
-  # Reads from local.nix (gitignored, created during provisioning)
   home.username = local.username;
   home.homeDirectory = local.homeDirectory;
 
