@@ -1,9 +1,13 @@
 { config, pkgs, lib, ... }:
 
+let
+  local = import ./local.nix;
+in
 {
   # Home Manager needs a bit of information about you and the paths it should manage
-  home.username = "safareli";
-  home.homeDirectory = "/home/safareli";
+  # Reads from local.nix (gitignored, created during provisioning)
+  home.username = local.username;
+  home.homeDirectory = local.homeDirectory;
 
   # This value determines the Home Manager release compatibility
   home.stateVersion = "24.11";

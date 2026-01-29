@@ -1,0 +1,132 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="$SCRIPT_DIR/colima.yaml"
+PROFILE="${L_COLIMA_PROFILE:-l}"
+PROFILE_DIR="$HOME/.colima/$PROFILE"
+PROFILE_CONFIG="$PROFILE_DIR/colima.yaml"
+
+case "$1" in
+  setup)
+    echo "=== SETUP VM CONFIG ==="
+    mkdir -p "$PROFILE_DIR"
+    if [[ -e "$PROFILE_CONFIG" ]]; then
+      read -p "Config '$PROFILE_CONFIG' already exists. Overwrite? [y/N] " confirm
+      if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+      fi
+    fi
+    cp "$CONFIG" "$PROFILE_CONFIG"
+    echo "Config copied to $PROFILE_CONFIG"
+    ;;
+  up)
+    echo "=== STARTING VM ==="
+    colima start --profile "$PROFILE"
+    ;;
+  down)
+    echo "=== STOPPING VM ==="
+    colima stop --profile "$PROFILE"
+    ;;
+  health)
+    echo "=== HEALTH CHECK ==="
+    echo "=== VM Status (profile: $PROFILE) ==="
+    colima status --profile "$PROFILE" 2>&1
+    echo ""
+    echo "=== Docker Contexts (* = active) ==="
+    docker context ls
+    CONTEXT_NAME="colima-$PROFILE"
+    if ! docker context ls --format '{{.Name}}' | grep -q "^${CONTEXT_NAME}$"; then
+      echo ""
+      echo "Context '$CONTEXT_NAME' does not exist."
+    elif ! docker context ls --format '{{.Current}} {{.Name}}' | grep -q "^true ${CONTEXT_NAME}$"; then
+      echo ""
+      echo "To switch to this profile's context run:"
+      echo "  docker context use $CONTEXT_NAME"
+    fi
+    echo ""
+    echo "=== VM Network ==="
+    if ssh "colima-$PROFILE" "wget -q --spider https://nixos.org" 2>/dev/null; then
+      echo "DNS: ready"
+    else
+      echo "DNS: not ready"
+    fi
+    ;;
+  rm)
+    echo "=== REMOVING VM ==="
+    read -p "Delete VM profile '$PROFILE'? This will destroy all data. [y/N] " confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+      colima delete --profile "$PROFILE" --force
+    else
+      echo "Aborted."
+    fi
+    ;;
+  provision)
+    echo "=== PROVISIONING VM ==="
+    SSH_HOST="colima-$PROFILE"
+
+    # System provisioning (as root)
+    ssh "$SSH_HOST" "sudo bash -s" <<'SYSTEM_EOF'
+      set -e
+      [ -f /etc/provision-system-done ] && echo "System already provisioned" && exit 0
+
+      echo "==> Installing Tailscale..."
+      if ! command -v tailscale &> /dev/null; then
+        wget -qO- https://tailscale.com/install.sh | sh
+      fi
+
+      echo "==> Installing Nix dependencies..."
+      apt-get update && apt-get install -y xz-utils
+
+      echo "==> Installing Nix..."
+      if [ ! -d /nix ]; then
+        wget -O /tmp/nix-install.sh https://nixos.org/nix/install
+        sh /tmp/nix-install.sh --daemon --yes
+        rm /tmp/nix-install.sh
+      fi
+
+      echo "==> Enabling Nix experimental features..."
+      if ! grep -q "experimental-features" /etc/nix/nix.conf 2>/dev/null; then
+        echo "experimental-features = fetch-tree nix-command flakes" >> /etc/nix/nix.conf
+        systemctl restart nix-daemon
+      fi
+
+      touch /etc/provision-system-done
+      echo "==> System provisioning complete"
+SYSTEM_EOF
+
+    # User provisioning
+    ssh "$SSH_HOST" "bash -s" <<'USER_EOF'
+      set -e
+      [ -f ~/.provision-user-done ] && echo "User already provisioned" && exit 0
+
+      echo "==> Sourcing Nix..."
+      if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+        . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+      fi
+
+      echo "==> Setting up home-manager config..."
+      if [ ! -d ~/.config/home-manager ]; then
+        mkdir -p ~/.config
+        git clone https://github.com/safareli/l.git ~/.config/home-manager
+      fi
+
+      echo "==> Creating local.nix..."
+      ~/.config/home-manager/local.nix.sh
+
+      echo "==> Running home-manager switch..."
+      nix run home-manager/master -- switch --flake ~/.config/home-manager
+
+      echo "==> Enabling linger for user services..."
+      sudo loginctl enable-linger "$USER"
+
+      touch ~/.provision-user-done
+      echo "==> User provisioning complete"
+USER_EOF
+    ;;
+  *)
+    echo "Usage: vm [setup|up|down|health|rm|provision]"
+    exit 1
+    ;;
+esac
