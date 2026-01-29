@@ -1,7 +1,7 @@
 { config, pkgs, lib, ... }:
 
 let
-  local = import ./local.nix;
+  local = import ~/.config/home-manager.local.nix;
 in
 {
   # Home Manager needs a bit of information about you and the paths it should manage
