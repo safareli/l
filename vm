@@ -37,6 +37,22 @@ case "$1" in
     echo "=== VM Status (profile: $PROFILE) ==="
     colima status --profile "$PROFILE" 2>&1
     echo ""
+    echo "=== VM IP ==="
+    VM_IP=$(colima list --profile "$PROFILE" --json | grep -o '"address":"[^"]*"' | cut -d'"' -f4)
+    if [[ -n "$VM_IP" ]]; then
+      echo "IP: $VM_IP"
+    else
+      echo "IP: not assigned (enable network.address in colima.yaml)"
+    fi
+    echo ""
+    echo "=== mDNS (Avahi) ==="
+    if ping -c 1 -t 2 l.local &>/dev/null; then
+      MDNS_IP=$(ping -c 1 l.local 2>/dev/null | head -1 | grep -o '([^)]*)'| tr -d '()')
+      echo "l.local: $MDNS_IP"
+    else
+      echo "l.local: not resolving"
+    fi
+    echo ""
     echo "=== Docker Contexts (* = active) ==="
     docker context ls
     CONTEXT_NAME="colima-$PROFILE"
@@ -94,6 +110,28 @@ case "$1" in
         echo "experimental-features = fetch-tree nix-command flakes" >> /etc/nix/nix.conf
         systemctl restart nix-daemon
       fi
+
+      echo "==> Installing and configuring Avahi (mDNS)..."
+      apt-get install -y avahi-daemon
+      cat > /etc/avahi/avahi-daemon.conf <<'AVAHI_CONF'
+[server]
+host-name=l
+domain-name=local
+use-ipv4=yes
+use-ipv6=yes
+allow-interfaces=eth0
+
+[publish]
+publish-addresses=yes
+publish-hinfo=no
+publish-workstation=no
+
+[reflector]
+
+[rlimits]
+AVAHI_CONF
+      systemctl enable avahi-daemon
+      systemctl restart avahi-daemon
 
       touch /etc/provision-system-done
       echo "==> System provisioning complete"
