@@ -30,11 +30,19 @@ case "$1" in
     ;;
   up)
     echo "=== STARTING VM ==="
+    if [[ -x "$SCRIPT_DIR/hook_pre_up.sh" ]]; then
+      echo "=== Running pre-up hook ==="
+      "$SCRIPT_DIR/hook_pre_up.sh"
+    fi
     colima start --profile "$PROFILE"
     ;;
   down)
     echo "=== STOPPING VM ==="
     colima stop --profile "$PROFILE"
+    if [[ -x "$SCRIPT_DIR/hook_post_down.sh" ]]; then
+      echo "=== Running post-down hook ==="
+      "$SCRIPT_DIR/hook_post_down.sh"
+    fi
     ;;
   health)
     echo "=== HEALTH CHECK ==="
