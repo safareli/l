@@ -27,6 +27,10 @@ in
     opencode           # from github:anomalyco/opencode (pinned to v1.1.34)
     pi                 # from github:badlogic/pi-mono (pinned to v0.49.3)
 
+    # Editors
+    vim
+    nano
+
     # CLI tools
     tmux
     jq
@@ -41,6 +45,7 @@ in
     tree
     curl
     wget
+    iputils            # ping, tracepath, etc.
 
     # Process management
     process-compose    # docker-compose for processes
