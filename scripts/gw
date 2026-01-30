@@ -1,21 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-# Worktree management script
-# Usage:
-#   w n <name>           - Create new worktree with branch
-#   w n <name> <prompt>  - Create worktree and launch AI agent with prompt
-#   w d [name]           - Delete current or named worktree
-
-# Helper to signal cd to wrapper (or print if no wrapper)
-signal_cd() {
-    if [ -n "$GW_CD_FILE" ]; then
-        echo "$1" > "$GW_CD_FILE"
-    else
-        echo "  cd $1"
-    fi
-}
-
 show_help() {
     cat << 'EOF'
 Git worktree management tool
@@ -36,6 +21,15 @@ Examples:
   gw d
   gw d feature-old
 EOF
+}
+
+# Helper to signal cd to wrapper (or print if no wrapper)
+signal_cd() {
+    if [ -n "$GW_CD_FILE" ]; then
+        echo "$1" > "$GW_CD_FILE"
+    else
+        echo "  cd $1"
+    fi
 }
 
 # Get base directory name (strips --worktree suffix if present)
