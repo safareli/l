@@ -90,19 +90,16 @@
 
       # gw wrapper function to handle cd after worktree operations
       gw() {
-        local output
-        output=$("$HOME/.local/bin/gw" "$@")
+        local cdfile=$(mktemp)
+        trap "rm -f $cdfile" EXIT
+        
+        # Pass cdfile path to gw via env var - gw writes cd path there
+        GW_CD_FILE="$cdfile" "$HOME/.local/bin/gw" "$@"
         local exit_code=$?
         
-        # Check if output contains cd instruction
-        local cd_path=$(echo "$output" | grep "^GW_CD:" | cut -d: -f2-)
-        
-        # Print output without the GW_CD line
-        echo "$output" | grep -v "^GW_CD:"
-        
-        # If there's a cd path, change to it
-        if [ -n "$cd_path" ]; then
-          cd "$cd_path"
+        # If cdfile has content, cd to it
+        if [ -s "$cdfile" ]; then
+          cd "$(cat "$cdfile")"
         fi
         
         return $exit_code

@@ -7,6 +7,15 @@ set -e
 #   w n <name> <prompt>  - Create worktree and launch AI agent with prompt
 #   w d [name]           - Delete current or named worktree
 
+# Helper to signal cd to wrapper (or print if no wrapper)
+signal_cd() {
+    if [ -n "$GW_CD_FILE" ]; then
+        echo "$1" > "$GW_CD_FILE"
+    else
+        echo "  cd $1"
+    fi
+}
+
 show_help() {
     cat << 'EOF'
 Git worktree management tool
@@ -166,12 +175,13 @@ cmd_new() {
     if [ -n "$prompt" ]; then
         echo ""
         echo "Launching AI agent with prompt..."
+        # Signal cd before exec (in case pi exits and wrapper resumes)
+        signal_cd "$worktree_path"
         cd "$worktree_path"
         exec pi "$prompt"
     fi
 
-    echo "cd $worktree_path"
-    echo "GW_CD:$worktree_path"
+    signal_cd "$worktree_path"
 }
 
 cmd_delete() {
@@ -229,8 +239,7 @@ cmd_delete() {
     # Check if we're in the deleted worktree 
     if [ "$worktree_path" = "$git_root" ]; then
         # Signal to wrapper function to cd
-        echo "cd$cd_target"
-        echo "GW_CD:$cd_target"
+        signal_cd "$cd_target"
     fi
 }
 
