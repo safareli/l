@@ -8,6 +8,10 @@ PROFILE_DIR="$HOME/.colima/$PROFILE"
 PROFILE_CONFIG="$PROFILE_DIR/colima.yaml"
 
 case "$1" in
+  ssh)
+    SSH_HOST="colima-$PROFILE"
+    ssh "$SSH_HOST"
+    ;;
   setup)
     echo "=== SETUP VM CONFIG ==="
     "$0" down
@@ -170,7 +174,7 @@ USER_EOF
     "$0" health
     ;;
   *)
-    echo "Usage: vm [setup|up|down|health|rm|provision]"
+    echo "Usage: vm [setup|up|down|health|rm|provision|ssh]"
     exit 1
     ;;
 esac
