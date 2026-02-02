@@ -32,7 +32,6 @@ in
     nano
 
     # CLI tools
-    tmux
     jq
     gh                 # GitHub CLI
     lazygit
@@ -199,6 +198,46 @@ in
     # ignores = [
     #   ".DS_Store"
     # ];
+  };
+
+  # ============================================================================
+  # tmux
+  # ============================================================================
+  programs.tmux = {
+    enable = true;
+    shortcut = "a";  # Use Ctrl+a as prefix (like screen)
+    baseIndex = 1;   # Start windows at 1, not 0
+    terminal = "screen-256color";
+    historyLimit = 100000;
+    escapeTime = 0;  # No delay for escape key
+    mouse = true;    # Enable mouse support
+
+    extraConfig = ''
+      # Enable true color support
+      set -ga terminal-overrides ",*256col*:Tc"
+
+      # Split panes with | and -
+      bind | split-window -h -c "#{pane_current_path}"
+      bind - split-window -v -c "#{pane_current_path}"
+
+      # New window in current path
+      bind c new-window -c "#{pane_current_path}"
+
+      # Reload config
+      bind r source-file ~/.config/tmux/tmux.conf \; display "Config reloaded!"
+
+      # Switch panes with Alt+arrow without prefix
+      bind -n M-Left select-pane -L
+      bind -n M-Right select-pane -R
+      bind -n M-Up select-pane -U
+      bind -n M-Down select-pane -D
+
+      # Status bar styling
+      set -g status-style 'bg=#333333 fg=#5eacd3'
+      set -g status-left-length 50
+      set -g status-right-length 80
+      set -g status-right ' C-a ? help | C-a d detach | %H:%M '
+    '';
   };
 
   # ============================================================================
