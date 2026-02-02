@@ -80,39 +80,48 @@ in
       ];
     };
 
-    initContent = ''
-      # Custom prompt with user@host prefix
-      PROMPT="%F{green}%n@%m%f $PROMPT"
+    initContent = lib.mkMerge [
+      (lib.mkBefore ''
+        # Custom prompt with user@host prefix
+        PROMPT="%F{green}%n@%m%f $PROMPT"
 
-      # Git worktree username prefix
-      export GW_USER="irakli"
+        # Git worktree username prefix
+        export GW_USER="irakli"
 
-      # PATH additions
-      export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+        # PATH additions
+        export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 
-      # fzf keybindings (Ctrl+R for history, Ctrl+T for files)
-      if [ -n "''${commands[fzf-share]}" ]; then
-        source "$(fzf-share)/key-bindings.zsh"
-        source "$(fzf-share)/completion.zsh"
-      fi
-
-      # gw wrapper function to handle cd after worktree operations
-      gw() {
-        local cdfile=$(mktemp)
-        trap "rm -f $cdfile" EXIT
-        
-        # Pass cdfile path to gw via env var - gw writes cd path there
-        GW_CD_FILE="$cdfile" "$HOME/.local/bin/gw" "$@"
-        local exit_code=$?
-        
-        # If cdfile has content, cd to it
-        if [ -s "$cdfile" ]; then
-          cd "$(cat "$cdfile")"
+        # fzf keybindings (Ctrl+R for history, Ctrl+T for files)
+        if [ -n "''${commands[fzf-share]}" ]; then
+          source "$(fzf-share)/key-bindings.zsh"
+          source "$(fzf-share)/completion.zsh"
         fi
-        
-        return $exit_code
-      }
-    '';
+
+        # gw wrapper function to handle cd after worktree operations
+        gw() {
+          local cdfile=$(mktemp)
+          trap "rm -f $cdfile" EXIT
+          
+          # Pass cdfile path to gw via env var - gw writes cd path there
+          GW_CD_FILE="$cdfile" "$HOME/.local/bin/gw" "$@"
+          local exit_code=$?
+          
+          # If cdfile has content, cd to it
+          if [ -s "$cdfile" ]; then
+            cd "$(cat "$cdfile")"
+          fi
+          
+          return $exit_code
+        }
+      '')
+      (lib.mkAfter ''
+        # Lima BEGIN
+        # Make sure iptables and mount.fuse3 are available
+        PATH="$PATH:/usr/sbin:/sbin"
+        export PATH
+        # Lima END
+      '')
+    ];
 
     shellAliases = {
       ll = "eza -la";
