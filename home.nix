@@ -58,6 +58,9 @@ in
     # Nix tools
     nil                # Nix LSP
     nixpkgs-fmt        # Nix formatter
+
+    # Misc utilities
+    time               # GNU time (more detailed than shell builtin)
   ];
 
   # ============================================================================
@@ -134,6 +137,9 @@ in
       # Nix shortcuts
       hms = "home-manager switch --flake ~/.config/home-manager";
       hmu = "nix flake update ~/.config/home-manager && home-manager switch --flake ~/.config/home-manager";
+
+      # GNU time with verbose output (use \time for non-verbose)
+      time = "command time -v";
     };
   };
 
