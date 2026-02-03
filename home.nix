@@ -34,11 +34,11 @@ in
     # CLI tools
     jq
     gh                 # GitHub CLI
-    lazygit
     fzf
     ripgrep
     fd
     bat                # better cat
+    delta              # better diff pager
     eza                # better ls
     htop
     tree
@@ -168,19 +168,34 @@ in
         # editor = "cursor --wait";
       };
 
+      pager = {
+        diff = "delta --dark --paging=never --line-numbers";
+        show = "delta --dark --paging=never --line-numbers";
+        blame = "delta --dark --paging=never --line-numbers";
+      };
+
+      interactive = {
+        diffFilter = "delta --dark --color-only";
+      };
+
+      delta = {
+        navigate = true;
+      };
+
       alias = {
         lg = "log --oneline --graph --decorate";
         fm = "fetch origin main:main";
-        f = "fetch --all";
+        f = "fetch origin";
+        fa = "fetch --all";
         r = "rebase origin/main";
         m = "merge origin/main";
         p = "push";
         s = "status";
         c = "checkout";
         cp = "cherry-pick";
-        cm = "checkout --detach main";
+        main = "checkout --detach main";
         todo = "!f() { git diff main... --unified=0 | grep '^+.*TODO'; }; f";
-        cc = "commit";
+        cm = "commit";
         cn = "commit -n";
         ca = "commit --amend";
         n = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1; }; f'';
@@ -198,6 +213,23 @@ in
     # ignores = [
     #   ".DS_Store"
     # ];
+  };
+
+  # ============================================================================
+  # Lazygit
+  # ============================================================================
+  programs.lazygit = {
+    enable = true;
+    settings = {
+      git = {
+        pagers = [
+          {
+            colorArg = "always";
+            pager = "delta --dark --paging=never --line-numbers";
+          }
+        ];
+      };
+    };
   };
 
   # ============================================================================
