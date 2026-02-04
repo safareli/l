@@ -41,6 +41,7 @@ in
     delta              # better diff pager
     eza                # better ls
     htop
+    btop
     tree
     curl
     wget
