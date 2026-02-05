@@ -142,6 +142,9 @@ in
 
       # GNU time with verbose output (use \time for non-verbose)
       time = "command time -v";
+
+      # GitHub CI logs viewer
+      gh-run-view = "gh-run-view";
     };
   };
 
@@ -319,6 +322,12 @@ in
 
   home.file.".local/bin/gw" = {
     source = ./scripts/gw;
+    executable = true;
+  };
+
+  # View GitHub Actions logs with terminal colors (aliased as 'grv')
+  home.file.".local/bin/gh-run-view" = {
+    source = ./skills/gh-run-view/gh-run-view.sh;
     executable = true;
   };
 
