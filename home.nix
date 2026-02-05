@@ -23,9 +23,9 @@ in
     bun
 
     # AI tools
-    claude-code-bun    # from github:sadjow/claude-code-nix (faster, uses Bun)
-    opencode           # from github:anomalyco/opencode (pinned to v1.1.34)
-    pi                 # from github:badlogic/pi-mono (pinned to v0.49.3)
+    claude-code
+    opencode
+    pi
 
     # Editors
     vim
@@ -132,12 +132,13 @@ in
       ls = "eza";
       cat = "bat";
       lg = "lazygit";
-      claude = "claude-bun";
+      cc = "claude --dangerously-skip-permissions";
+      oc = "opencode";
       g = "git";
 
       # Nix shortcuts
       hms = "home-manager switch --flake ~/.config/home-manager";
-      hmu = "nix flake update ~/.config/home-manager && home-manager switch --flake ~/.config/home-manager";
+      hmu = "~/.config/home-manager/scripts/update-versions.sh && nix flake update --flake ~/.config/home-manager && home-manager switch --flake ~/.config/home-manager";
 
       # GNU time with verbose output (use \time for non-verbose)
       time = "command time -v";
@@ -311,6 +312,11 @@ in
   # ============================================================================
   # Custom Scripts
   # ============================================================================
+  # without this claude is confused it's like yo i'm definitly native install but why am i not where i think should be?
+  home.file.".local/bin/claude" = {
+    source = config.lib.file.mkOutOfStoreSymlink "${config.home.profileDirectory}/bin/claude";
+  };
+
   home.file.".local/bin/gw" = {
     source = ./scripts/gw;
     executable = true;

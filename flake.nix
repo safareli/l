@@ -7,34 +7,88 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    claude-code = {
-      url = "github:sadjow/claude-code-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    opencode = {
-      url = "github:anomalyco/opencode?ref=v1.1.34";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { nixpkgs, home-manager, claude-code, opencode, ... }:
+  outputs = { nixpkgs, home-manager, ... }:
     let
       system = "aarch64-linux";
+      versions = import ./versions.nix;
       pkgs = import nixpkgs {
         inherit system;
         overlays = [
-          claude-code.overlays.default
           (final: prev: {
-            opencode = opencode.packages.${system}.default;
+            # claude-code - https://claude.ai/install.sh
+            claude-code = prev.stdenv.mkDerivation rec {
+              pname = "claude-code";
+              inherit (versions.claude-code) version;
+
+              src = prev.fetchurl {
+                url = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/${version}/linux-arm64/claude";
+                inherit (versions.claude-code) sha256;
+              };
+
+              dontUnpack = true;
+              dontPatchELF = true;
+              dontStrip = true;
+
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin
+                cp $src $out/bin/claude
+                chmod +x $out/bin/claude
+                runHook postInstall
+              '';
+
+              meta = {
+                description = "Claude Code - Anthropic's AI coding assistant";
+                homepage = "https://claude.ai";
+                platforms = [ "aarch64-linux" ];
+              };
+            };
+
+            # opencode - https://github.com/anomalyco/opencode
+            opencode = prev.stdenv.mkDerivation rec {
+              pname = "opencode";
+              inherit (versions.opencode) version;
+
+              src = prev.fetchurl {
+                url = "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-arm64.tar.gz";
+                inherit (versions.opencode) sha256;
+              };
+
+              sourceRoot = ".";
+
+              unpackPhase = ''
+                tar -xzf $src
+              '';
+
+              # Don't use autoPatchelfHook - it breaks the bundled Bun executable
+              dontPatchELF = true;
+              dontStrip = true;
+
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin
+                cp opencode $out/bin/
+                chmod +x $out/bin/opencode
+                runHook postInstall
+              '';
+
+              meta = {
+                description = "OpenCode AI coding assistant";
+                homepage = "https://github.com/anomalyco/opencode";
+                platforms = [ "aarch64-linux" ];
+              };
+            };
 
             # pi (coding-agent) - https://github.com/badlogic/pi-mono
             pi = prev.stdenv.mkDerivation rec {
               pname = "pi";
-              version = "0.49.3";
+              inherit (versions.pi) version;
 
               src = prev.fetchzip {
                 url = "https://github.com/badlogic/pi-mono/releases/download/v${version}/pi-linux-arm64.tar.gz";
-                sha256 = "sha256-OuExtug5WJyqbzyIrfxcfXZAWS5egAeeYsYXoPXAzrQ=";
+                inherit (versions.pi) sha256;
                 stripRoot = false;
               };
 
