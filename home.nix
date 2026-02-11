@@ -310,6 +310,7 @@ in
   # Skills are stored in ~/.config/home-manager/skills/
   # and symlinked to each agent's expected location
   home.file.".pi/agent/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".pi/agent/extensions".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/pi-extensions";
   home.file.".claude/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
   home.file.".codex/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
 
