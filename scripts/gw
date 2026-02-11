@@ -150,6 +150,12 @@ cmd_new() {
         echo "Warning: No .env file found at $base_dir/.env"
     fi
 
+    # Copy .pi folder from base directory if it exists
+    if [ -d "$base_dir/.pi" ]; then
+        echo "Copying .pi from $base_dir..."
+        cp -r "$base_dir/.pi" "$worktree_path/.pi"
+    fi
+
     # Run package manager install based on lock file
     if [ -f "$worktree_path/pnpm-lock.yaml" ]; then
         echo "Running pnpm install in $worktree_path..."
