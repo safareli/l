@@ -321,6 +321,22 @@ in
     source = config.lib.file.mkOutOfStoreSymlink "${config.home.profileDirectory}/bin/claude";
   };
 
+  home.file.".local/bin/user-systemd-status" = {
+    text = ''
+      #!/usr/bin/env bash
+      systemctl status "user@$(id -u).service"
+    '';
+    executable = true;
+  };
+
+  home.file.".local/bin/user-systemd-restart" = {
+    text = ''
+      #!/usr/bin/env bash
+      sudo systemctl restart "user@$(id -u).service"
+    '';
+    executable = true;
+  };
+
   home.file.".local/bin/gw" = {
     source = ./scripts/gw;
     executable = true;
@@ -361,6 +377,8 @@ systemd.user.services.opencode-web = {
     Service = {
       EnvironmentFile = "-%h/.config/home-manager/.env";
       ExecStart = "${pkgs.opencode}/bin/opencode web --port 6767 --hostname=0.0.0.0";
+      StandardOutput = "append:%h/.local/share/opencode-web/opencode-web.log";
+      StandardError = "append:%h/.local/share/opencode-web/opencode-web.log";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -377,6 +395,8 @@ systemd.user.services.opencode-web = {
     Service = {
       WorkingDirectory = "%h/dev/tts";
       ExecStart = "%h/dev/tts/run_server.sh --host 0.0.0.0 --port 6768";
+      StandardOutput = "append:%h/.local/share/tts-server/tts-server.log";
+      StandardError = "append:%h/.local/share/tts-server/tts-server.log";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -392,6 +412,8 @@ systemd.user.services.opencode-web = {
     };
     Service = {
       ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/portal --port 1111 --addr 0.0.0.0";
+      StandardOutput = "append:%h/.local/share/portal/portal.log";
+      StandardError = "append:%h/.local/share/portal/portal.log";
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -407,6 +429,8 @@ systemd.user.services.opencode-web = {
     };
     Service = {
       ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 -t scrollback=100000 ${pkgs.zsh}/bin/zsh";
+      StandardOutput = "append:%h/.local/share/ttyd/ttyd.log";
+      StandardError = "append:%h/.local/share/ttyd/ttyd.log";
       Restart = "on-failure";
       RestartSec = 5;
     };
