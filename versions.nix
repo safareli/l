@@ -3,17 +3,17 @@
 # Runs as part of `hmu`
 {
   claude-code = {
-    version = "2.1.31";
-    sha256 = "sha256-CZmwSrVjNDxWrBuMM1knrqs+o0AtW9heBh5uDLMibCY=";
+    version = "2.1.39";
+    sha256 = "sha256-j2bgKlvopiDihvbmNPtCS1rAZXMbBIrz10XPcZsseFE=";
   };
 
   opencode = {
-    version = "1.1.51";
-    sha256 = "sha256-0GdT7AnTSgl43Knxu52CewAQIspO+vx1GCKBO2Q/T/k=";
+    version = "1.1.59";
+    sha256 = "sha256-KgO9k8SIEFkS+fr2RiSxsxFFPKZHppRknkin9yPT888=";
   };
 
   pi = {
-    version = "0.51.6";
-    sha256 = "sha256-rY9BCcKxpAs/GJ8BIznG0aK7/LpR2bIK/ol/XUg/Crk=";
+    version = "0.52.9";
+    sha256 = "sha256-KyJklb0HeKTD1LCea0bEsrNNhboHUcOa7+VjLbX0apA=";
   };
 }
