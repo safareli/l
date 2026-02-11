@@ -301,6 +301,7 @@ in
   # ============================================================================
   home.file.".vscode-server/data/Machine/settings.json".text = builtins.toJSON {
     "terminal.integrated.defaultProfile.linux" = "zsh";
+    "remote.autoForwardPorts" = false;
   };
 
   # ============================================================================
