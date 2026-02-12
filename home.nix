@@ -46,6 +46,7 @@ in
     curl
     wget
     iputils            # ping, tracepath, etc.
+    lsof
 
     # Process management
     process-compose    # docker-compose for processes
