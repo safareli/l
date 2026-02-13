@@ -5,28 +5,18 @@ description: Download YouTube video transcripts and generate AI summaries with t
 
 # YouTube Transcript
 
-Download YouTube transcripts, process them into timestamped and plain text formats, and generate AI summaries.
-
-## Setup
-
-```bash
-cd ~/dev/yt-transcript
-direnv allow
-```
+Download YouTube transcripts and process them into timestamped and plain text formats.
 
 ## Usage
 
-In non-interactive shells (like when running from an agent), direnv hooks don't auto-load.
-Use `eval "$(direnv export bash)"` to explicitly load the environment.
+`yt-transcript` is available on PATH via home-manager.
 
 ```bash
-cd ~/dev/yt-transcript && eval "$(direnv export bash)"
-
-# Basic usage (outputs to ./results/)
-./yt_transcript.sh "https://www.youtube.com/watch?v=VIDEO_ID"
+# Basic usage (outputs to /tmp/yt-transcript/)
+yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Custom output directory
-./yt_transcript.sh "https://www.youtube.com/watch?v=VIDEO_ID" ./my_output
+yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" ./my_output
 ```
 
 ## Output Files
@@ -35,13 +25,21 @@ All files are prefixed with `<video_id>-<video_title>`:
 
 - `*_timestamped.txt` - Transcript with timestamps per line
 - `*_text.txt` - Plain text transcript (no timestamps)
-- `*_summary.txt` - AI-generated summary with sections and tl;dr
 - `*.en.srt` - Original SRT subtitle file
 
-## Summary Format
+## After downloading
 
-The summary includes:
-- Header with video title and link
-- Sections with timestamps (e.g., `## Section Title (00:00:00 - 00:02:30)`)
-- tl;dr at the end
-- Ads/sponsor segments are excluded
+- If the user just dropped a YouTube link with no other instructions, or explicitly asked for a summary, read the `*_timestamped.txt` file and summarize it (see format below).
+- If the user asked a specific question about the video, read the transcript and answer that question directly — don't summarize.
+
+## Summary format
+
+- For each major topic/section:
+  ```
+  ## Section Title (HH:MM:SS - HH:MM:SS)
+  Brief description of what's covered
+  ```
+- Skip any ads, sponsor segments, or promotional content
+- Write in a direct way — no clickbait or mystery language, give all spoilers upfront
+- End with a **tl;dr** that captures the key takeaways in 2-3 sentences
+- Output only the sections and tl;dr — no preamble, no title, no meta-commentary

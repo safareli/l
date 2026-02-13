@@ -47,6 +47,7 @@ in
     wget
     iputils            # ping, tracepath, etc.
     lsof
+    yt-dlp
 
     # Process management
     process-compose    # docker-compose for processes
@@ -362,6 +363,14 @@ in
     executable = true;
   };
   
+  home.file.".local/bin/yt-transcript" = {
+    text = ''
+      #!/usr/bin/env bash
+      exec bun run "${config.xdg.configHome}/home-manager/skills/yt-transcript/yt_transcript.ts" "$@"
+    '';
+    executable = true;
+  };
+
   # View GitHub Actions logs with terminal colors (aliased as 'grv')
   home.file.".local/bin/gh-run-view" = {
     source = ./skills/gh-run-view/gh-run-view.sh;
