@@ -86,6 +86,13 @@ in
 
     initContent = lib.mkMerge [
       (lib.mkBefore ''
+        # Source secrets/env vars (gitignored)
+        if [ -f "$HOME/.config/home-manager/.env" ]; then
+          set -a
+          source "$HOME/.config/home-manager/.env"
+          set +a
+        fi
+
         # Custom prompt with user@host prefix
         PROMPT="%F{green}%n@%m%f $PROMPT"
 
@@ -347,6 +354,14 @@ in
     executable = true;
   };
 
+  home.file.".local/bin/brave-search" = {
+    text = ''
+      #!/usr/bin/env bash
+      exec node "${config.xdg.configHome}/home-manager/skills/brave-search/search.js" "$@"
+    '';
+    executable = true;
+  };
+  
   # View GitHub Actions logs with terminal colors (aliased as 'grv')
   home.file.".local/bin/gh-run-view" = {
     source = ./skills/gh-run-view/gh-run-view.sh;
