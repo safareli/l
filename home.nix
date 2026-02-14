@@ -366,7 +366,7 @@ in
   home.file.".local/bin/yt-transcript" = {
     text = ''
       #!/usr/bin/env bash
-      exec bun run "${config.xdg.configHome}/home-manager/skills/yt-transcript/yt_transcript.ts" "$@"
+      exec bun run "${config.xdg.configHome}/home-manager/skills/yt-transcript/yt-transcript.ts" "$@"
     '';
     executable = true;
   };

@@ -17,6 +17,9 @@ yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Custom output directory
 yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" ./my_output
+
+# Specify subtitle language (default: en)
+yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --lang ka
 ```
 
 ## Output Files
@@ -25,7 +28,7 @@ All files are prefixed with `<video_id>-<video_title>`:
 
 - `*_timestamped.txt` - Transcript with timestamps per line
 - `*_text.txt` - Plain text transcript (no timestamps)
-- `*.en.srt` - Original SRT subtitle file
+- `*.<lang>.srt` - Original SRT subtitle file
 
 ## After downloading
 
