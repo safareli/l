@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-stt - Speech-to-text transcription using whisper-cpp
+stt - Speech-to-text transcription
 
-Usage: stt <audio_file_or_url> [--outdir <dir>] [--timestamps]
+Default backend: NVIDIA NeMo FastConformer (English & Georgian)
+Alternative:     whisper-cpp (English only, via --whisper flag)
+
+Usage: stt <audio_file_or_url> [--lang <en|ka>] [--whisper] [--outdir <dir>] [--timestamps]
 
 Supports any audio format ffmpeg can decode. Downloads HTTP URLs automatically.
 Output: transcript written to /tmp/stt/<basename>-<timestamp>.txt
@@ -13,7 +16,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 import urllib.parse
@@ -21,14 +23,15 @@ from pathlib import Path
 
 DEFAULT_OUTDIR = "/tmp/stt"
 
+NEMO_LANGS = ["en", "ka"]
+
 
 def download_file(url: str, dest_dir: str) -> str:
     """Download a file from HTTP URL, return local path."""
-    print(f"Downloading: {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "stt/1.0"})
+    print(f"Downloading: {url}", file=sys.stderr)
+    req = urllib.request.Request(url, headers={"User-Agent": "stt/2.0"})
     resp = urllib.request.urlopen(req)
 
-    # Try to get filename from Content-Disposition or URL
     cd = resp.headers.get("Content-Disposition", "")
     match = re.search(r'filename[^;=\n]*=["\']?([^"\';\n]+)', cd)
     if match:
@@ -46,7 +49,7 @@ def download_file(url: str, dest_dir: str) -> str:
     with open(dest, "wb") as f:
         f.write(data)
 
-    print(f"Downloaded: {dest} ({len(data) / 1024:.1f} KB)")
+    print(f"Downloaded: {dest} ({len(data) / 1024:.1f} KB)", file=sys.stderr)
     return dest
 
 
@@ -58,7 +61,7 @@ def sanitize_name(name: str) -> str:
 
 def convert_to_wav(input_path: str, wav_path: str) -> None:
     """Convert audio to 16kHz mono WAV using ffmpeg."""
-    print("Converting to 16kHz mono WAV...")
+    print("Converting to 16kHz mono WAV...", file=sys.stderr)
     result = subprocess.run(
         ["ffmpeg", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path, "-y"],
         capture_output=True, text=True,
@@ -67,9 +70,14 @@ def convert_to_wav(input_path: str, wav_path: str) -> None:
         raise RuntimeError(f"ffmpeg conversion failed (exit {result.returncode}):\n{result.stderr}")
 
 
-def transcribe(wav_path: str, model_path: str, timestamps: bool) -> str:
+def transcribe_whisper(wav_path: str, timestamps: bool) -> str:
     """Transcribe WAV file using whisper-cli."""
-    print("Transcribing with whisper-cpp...")
+    model_path = os.environ.get("WHISPER_MODEL_PATH")
+    if not model_path:
+        print("Error: WHISPER_MODEL_PATH not set. Is whisper configured in home-manager?", file=sys.stderr)
+        sys.exit(1)
+
+    print("Transcribing with whisper-cpp (small.en)...", file=sys.stderr)
     cmd = ["whisper-cli", "-m", model_path, "-f", wav_path]
     if not timestamps:
         cmd.append("--no-timestamps")
@@ -82,7 +90,23 @@ def transcribe(wav_path: str, model_path: str, timestamps: bool) -> str:
     text = result.stdout.strip()
     if not text:
         raise RuntimeError(f"whisper-cli produced empty output. stderr:\n{result.stderr}")
+    return text
 
+
+def transcribe_nemo(wav_path: str, lang: str) -> str:
+    """Transcribe WAV file using stt-nemo (nix-built NeMo binary)."""
+    print(f"Transcribing with NeMo FastConformer ({lang})...", file=sys.stderr)
+
+    result = subprocess.run(
+        ["stt-nemo", wav_path, "--lang", lang],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"stt-nemo failed (exit {result.returncode}):\n{result.stderr}")
+
+    text = result.stdout.strip()
+    if not text:
+        raise RuntimeError(f"stt-nemo produced empty output. stderr:\n{result.stderr}")
     return text
 
 
@@ -101,17 +125,23 @@ def cleanup(*paths: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="stt",
-        description="Speech-to-text transcription using whisper-cpp",
+        description="Speech-to-text transcription (NeMo FastConformer / whisper-cpp)",
     )
     parser.add_argument("input", help="Audio file path or HTTP URL")
+    parser.add_argument(
+        "-l", "--lang", default="en", choices=NEMO_LANGS,
+        help="Language to transcribe (default: en). Supported: en, ka",
+    )
+    parser.add_argument(
+        "--whisper", action="store_true",
+        help="Use whisper-cpp instead of NeMo (English only)",
+    )
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help=f"Output directory (default: {DEFAULT_OUTDIR})")
-    parser.add_argument("--timestamps", action="store_true", help="Include timestamps in output")
+    parser.add_argument("--timestamps", action="store_true", help="Include timestamps (whisper only)")
     args = parser.parse_args()
 
-    model_path = os.environ.get("WHISPER_MODEL_PATH")
-    if not model_path:
-        print("Error: WHISPER_MODEL_PATH environment variable is not set.", file=sys.stderr)
-        print("Ensure whisper model is configured in home-manager.", file=sys.stderr)
+    if args.whisper and args.lang != "en":
+        print("Error: --whisper only supports English.", file=sys.stderr)
         sys.exit(1)
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -130,22 +160,25 @@ def main() -> None:
                 print(f"Error: File not found: {audio_path}", file=sys.stderr)
                 sys.exit(1)
 
-        # Step 2: Convert to WAV
+        # Step 2: Convert to WAV (16kHz mono)
         stem = sanitize_name(Path(audio_path).stem)
         wav_path = os.path.join(args.outdir, f"{stem}-{ts}.wav")
         tmp_files.append(wav_path)
         convert_to_wav(audio_path, wav_path)
 
         # Step 3: Transcribe
-        transcription = transcribe(wav_path, model_path, args.timestamps)
+        if args.whisper:
+            transcription = transcribe_whisper(wav_path, args.timestamps)
+        else:
+            transcription = transcribe_nemo(wav_path, args.lang)
 
         # Step 4: Write output
         output_path = os.path.join(args.outdir, f"{stem}-{ts}.txt")
         with open(output_path, "w") as f:
             f.write(transcription + "\n")
 
-        print(f"\nTranscript written to: {output_path}")
-        print(f"Length: {len(transcription)} chars")
+        print(f"\nTranscript written to: {output_path}", file=sys.stderr)
+        print(f"Length: {len(transcription)} chars", file=sys.stderr)
 
     finally:
         cleanup(*tmp_files)

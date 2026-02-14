@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stt-nemo"
+version = "0.1.0"
+description = "Speech-to-text using NVIDIA NeMo FastConformer (English & Georgian)"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "nemo_toolkit[asr]==2.1.0",
+    "numpy<2",
+    "torch",
+]
+
+[project.scripts]
+stt-nemo = "stt_nemo:main"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

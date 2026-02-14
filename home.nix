@@ -133,7 +133,8 @@ in
     nixpkgs-fmt        # Nix formatter
 
     # Speech-to-text
-    whisper-cpp        # whisper-cli for STT
+    whisper-cpp        # whisper-cli for STT (--whisper flag)
+    uv                 # Python package manager (used by stt-nemo)
     ffmpeg-headless    # audio format conversion
 
     # Text-to-speech (Kokoro TTS)
@@ -456,6 +457,15 @@ in
     text = ''
       #!/usr/bin/env bash
       exec bun run "${config.xdg.configHome}/home-manager/skills/yt-transcript/yt-transcript.ts" "$@"
+    '';
+    executable = true;
+  };
+
+  home.file.".local/bin/stt-nemo" = {
+    text = ''
+      #!/usr/bin/env bash
+      cd "${config.xdg.configHome}/home-manager/skills/stt"
+      exec uv run --python python3.11 python -m stt_nemo "$@"
     '';
     executable = true;
   };
