@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""
+tts - Text-to-speech synthesis using Kokoro-82M and Piper TTS
+
+Usage:
+  tts "text to speak"
+  tts "text" --voice af_heart --speed 1.2
+  tts --file input.txt -o output.wav
+  echo "text" | tts
+  tts "გამარჯობა"                          # auto-detects Georgian → Piper
+  tts "Hello world" --piper                # force Piper backend
+  tts --voices                             # list available voices
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+import warnings
+from pathlib import Path
+
+DEFAULT_OUTDIR = "/tmp/tts"
+
+PIPER_BIN = os.environ.get("PIPER_BIN", "piper")
+PIPER_VOICES_DIR = os.environ.get("PIPER_VOICES_DIR", "")
+
+# Georgian Unicode block: U+10A0–U+10FF (Mkhedruli + Asomtavruli)
+# Also U+2D00–U+2D2F (Nuskhuri supplement)
+GEORGIAN_RE = re.compile(r"[\u10A0-\u10FF\u2D00-\u2D2F]")
+
+KOKORO_VOICES = {
+    "American English (a)": [
+        "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+        "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+        "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+        "am_onyx", "am_puck", "am_santa",
+    ],
+    "British English (b)": [
+        "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+        "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    ],
+    "Spanish (e)": ["ef_dora", "em_alex", "em_santa"],
+    "French (f)": ["ff_siwis"],
+    "Hindi (h)": ["hf_alpha", "hf_beta", "hm_omega", "hm_psi"],
+    "Italian (i)": ["if_sara", "im_nicola"],
+    "Japanese (j)": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"],
+    "Brazilian Portuguese (p)": ["pf_dora", "pm_alex", "pm_santa"],
+    "Mandarin Chinese (z)": [
+        "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
+        "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+    ],
+}
+
+PIPER_VOICE_LIST = {
+    "Georgian (ka)": ["ka_GE-natia-medium"],
+    "American English (en_US)": ["en_US-lessac-medium"],
+}
+
+LANGUAGES = {
+    "a": "American English",
+    "b": "British English",
+    "e": "Spanish",
+    "f": "French",
+    "h": "Hindi",
+    "i": "Italian",
+    "j": "Japanese",
+    "p": "Brazilian Portuguese",
+    "z": "Mandarin Chinese",
+}
+
+
+def sanitize_name(name: str) -> str:
+    name = re.sub(r"[^\w.\-]", "_", name)
+    name = re.sub(r"_+", "_", name)
+    return name[:60]
+
+
+def contains_georgian(text: str) -> bool:
+    return bool(GEORGIAN_RE.search(text))
+
+
+def print_voices() -> None:
+    print("Available voices:\n")
+    print("  === Kokoro (default) ===\n")
+    for lang, voices in KOKORO_VOICES.items():
+        print(f"  {lang}:")
+        female = [v for v in voices if v[1] == "f"]
+        male = [v for v in voices if v[1] == "m"]
+        if female:
+            print(f"    Female: {', '.join(female)}")
+        if male:
+            print(f"    Male:   {', '.join(male)}")
+        print()
+
+    print("  === Piper (--piper or auto-detected) ===\n")
+    for lang, voices in PIPER_VOICE_LIST.items():
+        print(f"  {lang}: {', '.join(voices)}")
+    print()
+
+
+# --- Piper backend ---
+
+def synthesize_piper(
+    text: str | None,
+    input_file: str | None,
+    output_path: str,
+    voice_name: str,
+    speed: float,
+) -> None:
+    if not PIPER_VOICES_DIR:
+        print("Error: PIPER_VOICES_DIR not set. Is piper-tts configured in home-manager?", file=sys.stderr)
+        sys.exit(1)
+
+    model_path = os.path.join(PIPER_VOICES_DIR, f"{voice_name}.onnx")
+    if not os.path.isfile(model_path):
+        all_voices = [v for vs in PIPER_VOICE_LIST.values() for v in vs]
+        print(f"Error: Piper voice model not found: {model_path}", file=sys.stderr)
+        print(f"Available voices: {', '.join(all_voices)}", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = [PIPER_BIN, "-m", model_path, "-f", output_path]
+
+    if speed != 1.0:
+        # Piper uses length_scale: >1 = slower, <1 = faster (inverse of speed)
+        cmd.extend(["--length-scale", str(1.0 / speed)])
+
+    print(f'Generating speech with Piper voice "{voice_name}" at speed {speed}x...', file=sys.stderr)
+
+    if input_file:
+        with open(input_file, "r") as f:
+            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+    else:
+        result = subprocess.run(cmd, input=text or "", capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"Error: Piper synthesis failed (exit {result.returncode})", file=sys.stderr)
+        if result.stderr.strip():
+            print(result.stderr.strip(), file=sys.stderr)
+        sys.exit(1)
+
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+
+
+# --- Kokoro backend ---
+
+def synthesize_kokoro(
+    text: str | None,
+    input_file: str | None,
+    output_path: str,
+    voice: str,
+    speed: float,
+) -> None:
+    import wave
+
+    # Suppress warnings from kokoro/torch
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=FutureWarning)
+
+    import numpy as np
+
+    # Resolve text
+    if text:
+        content = text
+    elif input_file:
+        content = Path(input_file).read_text()
+    else:
+        content = ""
+
+    if not content.strip():
+        print("Error: no text provided", file=sys.stderr)
+        sys.exit(1)
+
+    lang = voice[0]
+
+    print(f'Generating speech with Kokoro voice "{voice}" at speed {speed}x...', file=sys.stderr)
+
+    from kokoro import KPipeline
+
+    pipeline = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M")
+
+    with wave.open(output_path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(24000)
+
+        for result in pipeline(content, voice=voice, speed=speed, split_pattern=r"\n+"):
+            if result.audio is None:
+                continue
+            audio_bytes = (result.audio.numpy() * 32767).astype(np.int16).tobytes()
+            wav_file.writeframes(audio_bytes)
+
+
+# --- Main ---
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="tts",
+        description="Text-to-speech synthesis using Kokoro-82M and Piper TTS",
+    )
+    parser.add_argument("text", nargs="*", help="Text to speak")
+    parser.add_argument("-v", "--voice", default="af_heart", help="Kokoro voice name (default: af_heart)")
+    parser.add_argument("-s", "--speed", type=float, default=1.0, help="Speech speed (default: 1.0)")
+    parser.add_argument("-f", "--file", help="Read text from file")
+    parser.add_argument("-o", "--output", help="Output WAV file path")
+    parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help=f"Output directory (default: {DEFAULT_OUTDIR})")
+    parser.add_argument("--voices", action="store_true", help="List available voices")
+    parser.add_argument("--piper", action="store_true", help="Force Piper backend")
+    parser.add_argument("--piper-voice", default="", help="Piper voice name (implies --piper)")
+    args = parser.parse_args()
+
+    if args.voices:
+        print_voices()
+        return
+
+    if args.piper_voice:
+        args.piper = True
+
+    # Determine text source
+    text_source: str | None = None
+    input_file: str | None = None
+
+    if args.text:
+        text_source = " ".join(args.text)
+    elif args.file:
+        if not os.path.isfile(args.file):
+            print(f"Error: File not found: {args.file}", file=sys.stderr)
+            sys.exit(1)
+        input_file = args.file
+    elif not sys.stdin.isatty():
+        text_source = sys.stdin.read()
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+    if text_source is not None and not text_source.strip():
+        print("Error: No text provided", file=sys.stderr)
+        sys.exit(1)
+
+    # Detect Georgian for backend routing
+    text_for_detection = text_source
+    if not text_for_detection and input_file:
+        text_for_detection = Path(input_file).read_text()
+
+    is_georgian = contains_georgian(text_for_detection) if text_for_detection else False
+    use_piper = args.piper or is_georgian
+
+    # Determine Piper voice
+    piper_voice = args.piper_voice
+    if use_piper and not piper_voice:
+        piper_voice = "ka_GE-natia-medium" if is_georgian else "en_US-lessac-medium"
+
+    # Voice label for filename
+    voice_label = piper_voice if use_piper else args.voice
+
+    # Output path
+    os.makedirs(args.outdir, exist_ok=True)
+    output_path = args.output or os.path.join(
+        args.outdir,
+        f"tts-{sanitize_name(voice_label)}-{int(time.time() * 1000)}.wav",
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    # Synthesize
+    if use_piper:
+        synthesize_piper(text_source, input_file, output_path, piper_voice, args.speed)
+    else:
+        synthesize_kokoro(text_source, input_file, output_path, args.voice, args.speed)
+
+    print(output_path)
+
+
+if __name__ == "__main__":
+    main()

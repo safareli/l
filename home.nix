@@ -2,6 +2,67 @@
 
 let
   local = { username = "safareli"; homeDirectory = "/home/safareli.linux"; };
+  whisper-model-small-en = pkgs.fetchurl {
+    url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin";
+    hash = "sha256-xhONbVjsyDIgl+D5h8MvG+i7ChhTKj+I9zTRu/nEHl0=";
+  };
+
+  # Piper TTS (inference only, no training deps)
+  # Note: v1.4.1 unconditionally imports pathvalidate in __main__.py even though
+  # nixpkgs puts it in the 'train' optional deps. We patch it in via override.
+  piper-tts-lite = (pkgs.piper-tts.override {
+    withTrain = false;
+    withHTTP = false;
+    withAlignment = false;
+  }).overrideAttrs (old: {
+    propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
+      pkgs.python313Packages.pathvalidate
+    ];
+  });
+
+  # Piper voice models from HuggingFace (rhasspy/piper-voices)
+  piper-voice-ka = {
+    onnx = pkgs.fetchurl {
+      url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ka/ka_GE/natia/medium/ka_GE-natia-medium.onnx";
+      hash = "sha256-BL2s8Yj6JEmYhfkQmzlf6FYaBews2Q1VRT7Fvu169GA=";
+    };
+    json = pkgs.fetchurl {
+      url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ka/ka_GE/natia/medium/ka_GE-natia-medium.onnx.json";
+      hash = "sha256-kGQ20PjeefzWVXZHCxDH6pN8dQ+ba22vxyonzr1KiPY=";
+    };
+  };
+
+  piper-voice-en = {
+    onnx = pkgs.fetchurl {
+      url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx";
+      hash = "sha256-Xv4J5pkCGHgnr2RuGm6dJp3udp+Yd9F7FrG0buqvAZ8=";
+    };
+    json = pkgs.fetchurl {
+      url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json";
+      hash = "sha256-7+GcQXvtBV8taZCCSMa6ZQ+hNbyGiw5quz2hgdq2kKA=";
+    };
+  };
+
+  # Derivation that symlinks voice models into a single directory
+  # (piper expects .onnx and .onnx.json to be co-located)
+  piper-voices = pkgs.runCommand "piper-voices" {} ''
+    mkdir -p $out
+    ln -s ${piper-voice-ka.onnx} $out/ka_GE-natia-medium.onnx
+    ln -s ${piper-voice-ka.json} $out/ka_GE-natia-medium.onnx.json
+    ln -s ${piper-voice-en.onnx} $out/en_US-lessac-medium.onnx
+    ln -s ${piper-voice-en.json} $out/en_US-lessac-medium.onnx.json
+  '';
+
+  # Shared env vars exported in both bash and zsh shell init
+  shellEnvVars = {
+    WHISPER_MODEL_PATH = "${whisper-model-small-en}";
+    PIPER_VOICES_DIR = "${piper-voices}";
+    PIPER_BIN = "${piper-tts-lite}/bin/piper";
+  };
+
+  # Convert attrset to shell export lines
+  shellEnvExports = lib.concatStringsSep "\n"
+    (lib.mapAttrsToList (name: value: ''export ${name}="${value}"'') shellEnvVars);
 in
 {
   # Home Manager needs a bit of information about you and the paths it should manage
@@ -62,9 +123,25 @@ in
     nil                # Nix LSP
     nixpkgs-fmt        # Nix formatter
 
+    # Speech-to-text
+    whisper-cpp        # whisper-cli for STT
+    ffmpeg-headless    # audio format conversion
+
+    # Text-to-speech (Kokoro TTS)
+    (python312.withPackages (ps: [ ps.kokoro ps.soundfile ps.spacy-models.en_core_web_sm ]))
+    espeak-ng          # phonemizer backend for Kokoro TTS
+
     # Misc utilities
     time               # GNU time (more detailed than shell builtin)
   ];
+  
+  # ============================================================================
+  # Shell - Bash (so hm-session-vars are sourced in bash sessions too, e.g. pi)
+  # ============================================================================
+  programs.bash = {
+    enable = true;
+    initExtra = shellEnvExports;
+  };
 
   # ============================================================================
   # Shell - Zsh
@@ -96,6 +173,9 @@ in
 
         # Custom prompt with user@host prefix
         PROMPT="%F{green}%n@%m%f $PROMPT"
+
+        # Shared env vars (defined in shellEnvVars)
+        ${shellEnvExports}
 
         # Git worktree username prefix
         export GW_USER="irakli"
@@ -368,6 +448,16 @@ in
       #!/usr/bin/env bash
       exec bun run "${config.xdg.configHome}/home-manager/skills/yt-transcript/yt-transcript.ts" "$@"
     '';
+    executable = true;
+  };
+
+  home.file.".local/bin/stt" = {
+    source = ./skills/stt/stt;
+    executable = true;
+  };
+
+  home.file.".local/bin/tts" = {
+    source = ./skills/tts/tts;
     executable = true;
   };
 

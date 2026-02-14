@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+stt - Speech-to-text transcription using whisper-cpp
+
+Usage: stt <audio_file_or_url> [--outdir <dir>] [--timestamps]
+
+Supports any audio format ffmpeg can decode. Downloads HTTP URLs automatically.
+Output: transcript written to /tmp/stt/<basename>-<timestamp>.txt
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import urllib.parse
+from pathlib import Path
+
+DEFAULT_OUTDIR = "/tmp/stt"
+
+
+def download_file(url: str, dest_dir: str) -> str:
+    """Download a file from HTTP URL, return local path."""
+    print(f"Downloading: {url}")
+    req = urllib.request.Request(url, headers={"User-Agent": "stt/1.0"})
+    resp = urllib.request.urlopen(req)
+
+    # Try to get filename from Content-Disposition or URL
+    cd = resp.headers.get("Content-Disposition", "")
+    match = re.search(r'filename[^;=\n]*=["\']?([^"\';\n]+)', cd)
+    if match:
+        filename = match.group(1).strip()
+    else:
+        filename = os.path.basename(urllib.parse.urlparse(url).path)
+
+    if not filename or filename == "/":
+        filename = "audio_download"
+
+    filename = sanitize_name(filename)
+    dest = os.path.join(dest_dir, f"dl-{int(time.time() * 1000)}-{filename}")
+
+    data = resp.read()
+    with open(dest, "wb") as f:
+        f.write(data)
+
+    print(f"Downloaded: {dest} ({len(data) / 1024:.1f} KB)")
+    return dest
+
+
+def sanitize_name(name: str) -> str:
+    name = re.sub(r"[^\w.\-]", "_", name)
+    name = re.sub(r"_+", "_", name)
+    return name[:80]
+
+
+def convert_to_wav(input_path: str, wav_path: str) -> None:
+    """Convert audio to 16kHz mono WAV using ffmpeg."""
+    print("Converting to 16kHz mono WAV...")
+    result = subprocess.run(
+        ["ffmpeg", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path, "-y"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg conversion failed (exit {result.returncode}):\n{result.stderr}")
+
+
+def transcribe(wav_path: str, model_path: str, timestamps: bool) -> str:
+    """Transcribe WAV file using whisper-cli."""
+    print("Transcribing with whisper-cpp...")
+    cmd = ["whisper-cli", "-m", model_path, "-f", wav_path]
+    if not timestamps:
+        cmd.append("--no-timestamps")
+    cmd.append("-np")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"whisper-cli failed (exit {result.returncode}):\n{result.stderr}")
+
+    text = result.stdout.strip()
+    if not text:
+        raise RuntimeError(f"whisper-cli produced empty output. stderr:\n{result.stderr}")
+
+    return text
+
+
+def is_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def cleanup(*paths: str) -> None:
+    for p in paths:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="stt",
+        description="Speech-to-text transcription using whisper-cpp",
+    )
+    parser.add_argument("input", help="Audio file path or HTTP URL")
+    parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help=f"Output directory (default: {DEFAULT_OUTDIR})")
+    parser.add_argument("--timestamps", action="store_true", help="Include timestamps in output")
+    args = parser.parse_args()
+
+    model_path = os.environ.get("WHISPER_MODEL_PATH")
+    if not model_path:
+        print("Error: WHISPER_MODEL_PATH environment variable is not set.", file=sys.stderr)
+        print("Ensure whisper model is configured in home-manager.", file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(args.outdir, exist_ok=True)
+
+    ts = int(time.time() * 1000)
+    tmp_files: list[str] = []
+
+    try:
+        # Step 1: Resolve input to a local file
+        if is_url(args.input):
+            audio_path = download_file(args.input, args.outdir)
+            tmp_files.append(audio_path)
+        else:
+            audio_path = os.path.abspath(args.input)
+            if not os.path.isfile(audio_path):
+                print(f"Error: File not found: {audio_path}", file=sys.stderr)
+                sys.exit(1)
+
+        # Step 2: Convert to WAV
+        stem = sanitize_name(Path(audio_path).stem)
+        wav_path = os.path.join(args.outdir, f"{stem}-{ts}.wav")
+        tmp_files.append(wav_path)
+        convert_to_wav(audio_path, wav_path)
+
+        # Step 3: Transcribe
+        transcription = transcribe(wav_path, model_path, args.timestamps)
+
+        # Step 4: Write output
+        output_path = os.path.join(args.outdir, f"{stem}-{ts}.txt")
+        with open(output_path, "w") as f:
+            f.write(transcription + "\n")
+
+        print(f"\nTranscript written to: {output_path}")
+        print(f"Length: {len(transcription)} chars")
+
+    finally:
+        cleanup(*tmp_files)
+
+
+if __name__ == "__main__":
+    main()
