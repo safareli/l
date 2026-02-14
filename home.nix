@@ -54,6 +54,10 @@ let
   '';
 
   # Shared env vars exported in both bash and zsh shell init
+  # NOTE: These are ALSO added to home.sessionVariables (see below) so that
+  # non-interactive shells (e.g. agents, VS Code tasks) can see them.
+  # Changing these requires a full re-login — even restarting VS Code Server,
+  # since it inherits env from the login session. Yeah, it's fucking annoying.
   shellEnvVars = {
     WHISPER_MODEL_PATH = "${whisper-model-small-en}";
     PIPER_VOICES_DIR = "${piper-voices}";
@@ -68,6 +72,11 @@ in
   # Home Manager needs a bit of information about you and the paths it should manage
   home.username = local.username;
   home.homeDirectory = local.homeDirectory;
+
+  # Session-level env vars so non-interactive shells (agents, VS Code tasks) see them.
+  # WARNING: Changing these requires re-login. For VS Code Server that means
+  # restarting it entirely — it caches the env from the login session.
+  home.sessionVariables = shellEnvVars;
 
   # This value determines the Home Manager release compatibility
   home.stateVersion = "24.11";
