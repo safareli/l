@@ -7,7 +7,7 @@ description: Text-to-speech synthesis using Kokoro-82M and Piper TTS. Converts t
 
 Synthesize speech from text using two backends:
 - **[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)** (default) — lightweight 82M param model, 9 languages, 50+ voices
-- **[Piper TTS](https://github.com/OHF-Voice/piper1-gpl)** — fast ONNX-based TTS, used for Georgian and as an alternative backend
+- **[Piper TTS](https://github.com/OHF-Voice/piper1-gpl)** — fast ONNX-based TTS, alternative backend (use `--piper` to force)
 
 ## Usage
 
@@ -41,6 +41,10 @@ tts --voices
 # Georgian text (auto-detected → Piper)
 tts "გამარჯობა, მე ვარ ქართველი"
 
+# Georgian via Kokoro (experimental hack: espeak-ng G2P + Kokoro acoustic model)
+tts "გამარჯობა" --kokoro
+tts "გამარჯობა" --voice am_adam   # explicit voice also triggers Kokoro
+
 # Force Piper backend for English (e.g., for speed testing)
 tts "Hello world" --piper
 
@@ -58,10 +62,13 @@ tts "Hello world" --piper-voice en_US-lessac-medium
 - `--voices` - List all available voices
 - `--piper` - Force Piper backend instead of Kokoro
 - `--piper-voice <name>` - Piper voice name (implies `--piper`; default: auto-select)
+- `--kokoro` - Force Kokoro backend (e.g. for Georgian via espeak-ng G2P hack)
 
 ## Language Detection
 
-Georgian text is **auto-detected** by checking for Georgian Unicode characters (U+10A0–U+10FF). When detected, the Piper backend with `ka_GE-natia-medium` voice is used automatically.
+Georgian text is **auto-detected** by checking for Georgian Unicode characters (U+10A0–U+10FF). When detected, the **Piper** backend with `ka_GE-natia-medium` voice is used by default (best quality).
+
+Alternatively, Georgian can be routed through **Kokoro** using `--kokoro` or by specifying an explicit `--voice`. This uses an experimental hack: espeak-ng converts Georgian text to IPA phonemes, which are fed into Kokoro's acoustic model. All Georgian IPA phonemes happen to be in Kokoro's vocabulary. Quality is lower than Piper (accented, no Georgian prosody training) but allows using any of Kokoro's 50+ voices.
 
 ## Voices
 
@@ -69,6 +76,7 @@ Georgian text is **auto-detected** by checking for Georgian Unicode characters (
 
 Voice names follow the pattern `{lang}{gender}_{name}`:
 - First letter = language: `a` (American English), `b` (British English), `e` (Spanish), `f` (French), `h` (Hindi), `i` (Italian), `j` (Japanese), `p` (Brazilian Portuguese), `z` (Mandarin Chinese)
+- Georgian via Kokoro (`--kokoro`): uses any Kokoro voice with espeak-ng G2P (experimental, accented)
 - Second letter = gender: `f` (female), `m` (male)
 
 ### Popular Kokoro voices
@@ -95,7 +103,7 @@ Voice names follow the pattern `{lang}{gender}_{name}`:
 
 Writes WAV audio to `/tmp/tts/tts-<voice>-<timestamp>.wav` and prints the path to stdout. Progress/status messages go to stderr.
 
-- Kokoro: 24kHz, 16-bit mono
+- Kokoro (including Georgian): 24kHz, 16-bit mono
 - Piper: 22.05kHz, 16-bit mono
 
 ## After generating

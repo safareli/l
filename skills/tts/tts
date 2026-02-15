@@ -152,6 +152,7 @@ def synthesize_kokoro(
     output_path: str,
     voice: str,
     speed: float,
+    lang_code: str | None = None,
 ) -> None:
     import wave
 
@@ -173,7 +174,14 @@ def synthesize_kokoro(
         print("Error: no text provided", file=sys.stderr)
         sys.exit(1)
 
-    lang = voice[0]
+    # Use explicit lang_code if provided (e.g. Georgian), otherwise infer from voice
+    lang = lang_code or voice[0]
+
+    # Georgian: use espeak G2P directly + Kokoro acoustic model
+    if lang == "ka":
+        print(f'Generating speech with Kokoro voice "{voice}" (Georgian via espeak) at speed {speed}x...', file=sys.stderr)
+        _synthesize_kokoro_georgian(content, output_path, voice, speed)
+        return
 
     print(f'Generating speech with Kokoro voice "{voice}" at speed {speed}x...', file=sys.stderr)
 
@@ -193,6 +201,77 @@ def synthesize_kokoro(
             wav_file.writeframes(audio_bytes)
 
 
+def _synthesize_kokoro_georgian(
+    content: str,
+    output_path: str,
+    voice: str,
+    speed: float,
+) -> None:
+    """Georgian TTS: espeak-ng G2P (ka) → Kokoro acoustic model.
+
+    Since Kokoro doesn't natively support Georgian, we:
+    1. Use espeak-ng to convert Georgian text → IPA phonemes
+    2. Feed those phonemes directly into Kokoro's acoustic model
+    All Georgian IPA phonemes happen to be in Kokoro's vocabulary.
+    """
+    import wave
+
+    import numpy as np
+    import torch
+    from huggingface_hub import hf_hub_download
+    from kokoro.model import KModel
+    from misaki.espeak import EspeakG2P
+
+    g2p = EspeakG2P("ka")
+    model = KModel(repo_id="hexgrad/Kokoro-82M").eval()
+
+    # Load voice
+    voice_f = hf_hub_download(repo_id="hexgrad/Kokoro-82M", filename=f"voices/{voice}.pt")
+    pack = torch.load(voice_f, weights_only=True)
+
+    # Split text into chunks on newlines and sentence boundaries
+    chunks = re.split(r"\n+", content.strip())
+    # Further split long chunks on sentence boundaries
+    final_chunks = []
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        if len(chunk) <= 400:
+            final_chunks.append(chunk)
+        else:
+            sentences = re.split(r"([.!?…]+\s*)", chunk)
+            current = ""
+            for i in range(0, len(sentences), 2):
+                s = sentences[i]
+                if i + 1 < len(sentences):
+                    s += sentences[i + 1]
+                if len(current) + len(s) <= 400:
+                    current += s
+                else:
+                    if current:
+                        final_chunks.append(current.strip())
+                    current = s
+            if current:
+                final_chunks.append(current.strip())
+
+    with wave.open(output_path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(24000)
+
+        for chunk in final_chunks:
+            ps, _ = g2p(chunk)
+            if not ps:
+                continue
+            if len(ps) > 510:
+                ps = ps[:510]
+            output = model(ps, pack[len(ps) - 1], speed, return_output=True)
+            if output.audio is None:
+                continue
+            audio_bytes = (output.audio.numpy() * 32767).astype(np.int16).tobytes()
+            wav_file.writeframes(audio_bytes)
+
+
 # --- Main ---
 
 def main() -> None:
@@ -209,6 +288,7 @@ def main() -> None:
     parser.add_argument("--voices", action="store_true", help="List available voices")
     parser.add_argument("--piper", action="store_true", help="Force Piper backend")
     parser.add_argument("--piper-voice", default="", help="Piper voice name (implies --piper)")
+    parser.add_argument("--kokoro", action="store_true", help="Force Kokoro backend (e.g. for Georgian via espeak G2P hack)")
     args = parser.parse_args()
 
     if args.voices:
@@ -245,12 +325,22 @@ def main() -> None:
         text_for_detection = Path(input_file).read_text()
 
     is_georgian = contains_georgian(text_for_detection) if text_for_detection else False
-    use_piper = args.piper or is_georgian
+
+    # Determine if user explicitly requested a Kokoro voice (non-default)
+    user_set_voice = args.voice != "af_heart"
+
+    # Georgian defaults to Piper, unless user explicitly picks a Kokoro voice or --kokoro
+    use_piper = args.piper or (is_georgian and not args.kokoro and not user_set_voice)
 
     # Determine Piper voice
     piper_voice = args.piper_voice
     if use_piper and not piper_voice:
         piper_voice = "ka_GE-natia-medium" if is_georgian else "en_US-lessac-medium"
+
+    # For Kokoro Georgian, determine lang_code override
+    kokoro_lang_code: str | None = None
+    if is_georgian and not use_piper:
+        kokoro_lang_code = "ka"
 
     # Voice label for filename
     voice_label = piper_voice if use_piper else args.voice
@@ -267,7 +357,7 @@ def main() -> None:
     if use_piper:
         synthesize_piper(text_source, input_file, output_path, piper_voice, args.speed)
     else:
-        synthesize_kokoro(text_source, input_file, output_path, args.voice, args.speed)
+        synthesize_kokoro(text_source, input_file, output_path, args.voice, args.speed, lang_code=kokoro_lang_code)
 
     print(output_path)
 
