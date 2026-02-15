@@ -40,6 +40,11 @@ case "$1" in
       "$SCRIPT_DIR/hook_pre_up.sh"
     fi
     colima start --profile "$PROFILE"
+    echo "=== Configuring /etc/hosts ==="
+    ssh "colima-$PROFILE" "sudo bash -s" <<'HOSTS_EOF'
+      grep -qF 'console.neon.tech' /etc/hosts || echo '192.168.5.2 console.neon.tech' >> /etc/hosts
+      grep -qF 'api.github.com' /etc/hosts || echo '192.168.5.2 api.github.com' >> /etc/hosts
+HOSTS_EOF
     ;;
   down)
     echo "=== STOPPING VM ==="

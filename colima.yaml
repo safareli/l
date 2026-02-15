@@ -97,6 +97,9 @@ network:
   # EXAMPLE
   # dnsHosts:
   #   example.com: 1.2.3.4
+  # NOTE: once anything here is configured, access to anything else will stop.
+  # i.e. google.com will not be accessible. so going with /etc/hosts changes
+  # so i only override what i care
   dnsHosts: {}
     # host.docker.internal: host.lima.internal
 
@@ -204,8 +207,9 @@ cpuType: ""
 #
 # Default: []
 # Provisioning is handled by `./vm provision` after boot (DNS not available during cloud-init)
-# But in next release DNS issue is fixed https://github.com/abiosoft/colima/issues/1426#issuecomment-3872043360
+# TODO But in next release DNS issue is fixed https://github.com/abiosoft/colima/issues/1426#issuecomment-3872043360
 provision:
+  # TODO after update i should be able to have null mounts https://github.com/abiosoft/colima/issues/1510#issuecomment-3892680685
   - mode: system
     script: umount /Users/safareli 2>/dev/null || true
 
@@ -246,7 +250,7 @@ diskImage: ""
 # Size of the disk in GiB for the root filesystem of the virtual machine.
 # This value is ignored if no runtime is in use. i.e. `none` runtime.
 # Default: 20
-rootDisk: 40
+rootDisk: 50
 
 # Environment variables for the virtual machine.
 #
