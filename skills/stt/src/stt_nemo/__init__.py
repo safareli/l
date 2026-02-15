@@ -18,11 +18,14 @@ import os
 import sys
 import warnings
 
-# TODO we can try parakeet-tdt-0.6b-v3 which should be better than existing en version as well as whisper.
-# TODO upgrade to langid_pearlnet when available in NeMo (newer, lower error rate).
+# Model cache locations
+#   ~/.cache/huggingface/hub/
+#   ~/.cache/torch/NeMo/NeMo_2.1.0/
 NEMO_MODELS = {
     "en": "nvidia/stt_en_fastconformer_hybrid_large_pc",
     "ka": "nvidia/stt_ka_fastconformer_hybrid_large_pc",
+    # 2.4G in terms of speed it's same as whisper small.en and quiality is beter.
+    # "en": "nvidia/parakeet-tdt-0.6b-v3", 
 }
 
 # langid_ambernet: compact spoken language ID model trained on VoxLingua107
