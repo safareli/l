@@ -5,7 +5,7 @@ stt - Speech-to-text transcription
 Default backend: NVIDIA NeMo FastConformer (English & Georgian)
 Alternative:     whisper-cpp (English only, via --whisper flag)
 
-Usage: stt <audio_file_or_url> [--lang <en|ka>] [--whisper] [--outdir <dir>] [--timestamps]
+Usage: stt <audio_file_or_url> [--lang <auto|en|ka>] [--whisper] [--outdir <dir>] [--timestamps]
 
 Supports any audio format ffmpeg can decode. Downloads HTTP URLs automatically.
 Output: transcript written to /tmp/stt/<basename>-<timestamp>.txt
@@ -23,7 +23,7 @@ from pathlib import Path
 
 DEFAULT_OUTDIR = "/tmp/stt"
 
-NEMO_LANGS = ["en", "ka"]
+NEMO_LANGS = ["auto", "en", "ka"]
 
 
 def download_file(url: str, dest_dir: str) -> str:
@@ -95,7 +95,10 @@ def transcribe_whisper(wav_path: str, timestamps: bool) -> str:
 
 def transcribe_nemo(wav_path: str, lang: str) -> str:
     """Transcribe WAV file using stt-nemo (nix-built NeMo binary)."""
-    print(f"Transcribing with NeMo FastConformer ({lang})...", file=sys.stderr)
+    if lang == "auto":
+        print("Transcribing with NeMo FastConformer (auto-detect language)...", file=sys.stderr)
+    else:
+        print(f"Transcribing with NeMo FastConformer ({lang})...", file=sys.stderr)
 
     result = subprocess.run(
         ["stt-nemo", wav_path, "--lang", lang],
@@ -129,8 +132,8 @@ def main() -> None:
     )
     parser.add_argument("input", help="Audio file path or HTTP URL")
     parser.add_argument(
-        "-l", "--lang", default="en", choices=NEMO_LANGS,
-        help="Language to transcribe (default: en). Supported: en, ka",
+        "-l", "--lang", default="auto", choices=NEMO_LANGS,
+        help="Language: auto (detect), en, ka (default: auto)",
     )
     parser.add_argument(
         "--whisper", action="store_true",
@@ -140,7 +143,7 @@ def main() -> None:
     parser.add_argument("--timestamps", action="store_true", help="Include timestamps (whisper only)")
     args = parser.parse_args()
 
-    if args.whisper and args.lang != "en":
+    if args.whisper and args.lang not in ("en", "auto"):
         print("Error: --whisper only supports English.", file=sys.stderr)
         sys.exit(1)
 

@@ -1,6 +1,6 @@
 ---
 name: stt
-description: Speech-to-text transcription using NVIDIA NeMo FastConformer (English & Georgian) or whisper-cpp. Transcribes audio files (any format supported by ffmpeg) from local paths or HTTP URLs. Use when user wants to transcribe audio, convert speech to text, or get text from a voice/audio file.
+description: Speech-to-text transcription using NVIDIA NeMo FastConformer (English & Georgian) or whisper-cpp. Auto-detects spoken language via langid_ambernet. Transcribes audio files (any format supported by ffmpeg) from local paths or HTTP URLs. Use when user wants to transcribe audio, convert speech to text, or get text from a voice/audio file.
 ---
 
 # STT - Speech to Text
@@ -21,10 +21,11 @@ NeMo is **~2x faster** than whisper-cpp on CPU with comparable or better accurac
 `stt` is available on PATH via home-manager.
 
 ```bash
-# Transcribe English audio (default: NeMo)
+# Transcribe audio (auto-detects language by default)
 stt ./recording.mp3
 
-# Transcribe Georgian audio
+# Explicit language (skip auto-detection)
+stt ./recording.mp3 --lang en
 stt ./recording.mp3 --lang ka
 
 # Transcribe from an HTTP URL
@@ -42,7 +43,7 @@ stt ./recording.mp3 --outdir ./transcripts
 
 ### Options
 
-- `-l, --lang <en|ka>` - Language (default: `en`). Supported: `en` (English), `ka` (Georgian)
+- `-l, --lang <auto|en|ka>` - Language (default: `auto`). `auto` detects spoken language via langid_ambernet, then routes to the matching STT model. Supported explicit values: `en` (English), `ka` (Georgian)
 - `--whisper` - Use whisper-cpp backend instead of NeMo (English only)
 - `--outdir <dir>` - Output directory (default: `/tmp/stt/`)
 - `--timestamps` - Include timestamps in transcript output (whisper backend only)
@@ -71,6 +72,10 @@ Writes transcript to `/tmp/stt/<basename>-<timestamp>.txt` and prints the path t
 - If the user asked to transcribe and do something with the result (translate, summarize, etc.), read the transcript and perform the requested task.
 
 ## Models
+
+### Language Identification (auto-detect)
+
+- **AmberNet:** [`langid_ambernet`](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/langid_ambernet) — compact spoken language ID model trained on VoxLingua107 (107 languages), 10x smaller than SOTA with comparable accuracy. Downloaded on first use to `~/.cache/torch/NeMo/`.
 
 ### NeMo FastConformer (default)
 
