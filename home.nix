@@ -7,6 +7,8 @@ let
     hash = "sha256-xhONbVjsyDIgl+D5h8MvG+i7ChhTKj+I9zTRu/nEHl0=";
   };
 
+  kokoro-python = pkgs.python312.withPackages (ps: [ ps.kokoro ps.soundfile ps.spacy-models.en_core_web_sm ]);
+
   # Piper TTS (inference only, no training deps)
   # Note: v1.4.1 unconditionally imports pathvalidate in __main__.py even though
   # nixpkgs puts it in the 'train' optional deps. We patch it in via override.
@@ -138,7 +140,7 @@ in
     ffmpeg-headless    # audio format conversion
 
     # Text-to-speech (Kokoro TTS)
-    (python312.withPackages (ps: [ ps.kokoro ps.soundfile ps.spacy-models.en_core_web_sm ]))
+    kokoro-python
     espeak-ng          # phonemizer backend for Kokoro TTS
 
     # Misc utilities
@@ -476,7 +478,10 @@ in
   };
 
   home.file.".local/bin/tts" = {
-    source = ./skills/tts/tts;
+    text = ''
+      #!/usr/bin/env bash
+      exec "${kokoro-python}/bin/python3" "${config.xdg.configHome}/home-manager/skills/tts/tts" "$@"
+    '';
     executable = true;
   };
 

@@ -16,6 +16,9 @@ import os
 import sys
 import warnings
 
+# TODO we can try parakeet-tdt-0.6b-v3 which should be better than exsiting en versiona as well as whisper.
+# we can try langid_ambernet or langid_pearlnet models which are small models detecting spoken language.
+# that way we don't need to know what langauge someone is peaking in via cli flag
 NEMO_MODELS = {
     "en": "nvidia/stt_en_fastconformer_hybrid_large_pc",
     "ka": "nvidia/stt_ka_fastconformer_hybrid_large_pc",
