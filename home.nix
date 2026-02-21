@@ -130,6 +130,9 @@ in
     # JSON viewers
     # otree            # Not in nixpkgs - install via: cargo install otree
 
+    # Filesystem tools
+    fuse-overlayfs     # Rootless overlayfs (used by fast-wt)
+
     # Nix tools
     nil                # Nix LSP
     nixpkgs-fmt        # Nix formatter
@@ -152,7 +155,9 @@ in
   # ============================================================================
   programs.bash = {
     enable = true;
-    initExtra = shellEnvExports;
+    initExtra = shellEnvExports + ''
+      eval "$(gw shell-hook bash)"
+    '';
   };
 
   # ============================================================================
@@ -201,22 +206,8 @@ in
           source "$(fzf-share)/completion.zsh"
         fi
 
-        # gw wrapper function to handle cd after worktree operations
-        gw() {
-          local cdfile=$(mktemp)
-          trap "rm -f $cdfile" EXIT
-          
-          # Pass cdfile path to gw via env var - gw writes cd path there
-          GW_CD_FILE="$cdfile" "$HOME/.local/bin/gw" "$@"
-          local exit_code=$?
-          
-          # If cdfile has content, cd to it
-          if [ -s "$cdfile" ]; then
-            cd "$(cat "$cdfile")"
-          fi
-          
-          return $exit_code
-        }
+        # gw wrapper function to handle cd and deferred cleanup after worktree operations
+        eval "$(gw shell-hook zsh)"
       '')
       (lib.mkAfter ''
         # Lima BEGIN

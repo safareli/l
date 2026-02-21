@@ -1,42 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+GW_OVERLAY_DIR="${HOME}/.local/share/gw/overlays"
+GW_SYSTEMD_DIR="${HOME}/.config/systemd/user"
+
 show_help() {
     cat << 'EOF'
 Git worktree manager (sibling worktrees only)
 
 Usage:
-  gw new <name>      Create new worktree from main
-  gw fork <name>     Create new worktree from current HEAD
-  gw delete [name]   Delete current worktree (or named one)
-  gw list            List all worktrees
-  gw help            Show this help
+  gw new <name>           Create new worktree from main
+  gw fork <name>          Create new worktree from current HEAD
+  gw delete [name]        Delete current worktree (or named one)
+  gw list                 List all worktrees
+  gw init-golden          Set up current repo as overlay golden
+  gw update-golden        Update golden to latest origin/main
+  gw shell-hook <shell>   Print shell wrapper (add to .zshrc/.bashrc)
+  gw help                 Show this help
 
 Aliases:
-  n=new, f=fork, d=delete, l=list, h=help
+  n=new, f=fork, d=delete, l=list, ig=init-golden, ug=update-golden, h=help
+
+Shell integration:
+  eval "$(gw shell-hook zsh)"    # add to .zshrc
+  eval "$(gw shell-hook bash)"   # add to .bashrc
+
+When the base repo is initialized as golden (gw.golden=true in git config),
+new/fork use fuse-overlayfs for instant (~25ms) worktree creation with zero
+disk overhead. Mounts persist across reboots via systemd user services.
 
 Environment:
   GW_USER            Username prefix for new branches (default: $USER)
-  GW_CD_FILE         If set, gw writes target directory path to this file
+  GW_EVAL_FILE       If set, gw writes shell commands for the wrapper to eval
 
 Examples:
-  gw new feature-auth
+  gw init-golden                     # one-time setup
+  gw new feature-auth                # overlay if golden, normal otherwise
   gw fork split-current-task
   gw delete
-  gw delete irakli-2026-02-12-feature-auth
+  gw update-golden                   # fetch main, reinstall deps
 EOF
 }
 
-# Helper to signal cd to wrapper (or print if no wrapper)
+# ── Helpers ──────────────────────────────────────────────────────────
+
+signal_eval() {
+    if [ -n "${GW_EVAL_FILE:-}" ]; then
+        printf '%s\n' "$1" >> "$GW_EVAL_FILE"
+    else
+        eval "$1"
+    fi
+}
+
 signal_cd() {
-    if [ -n "${GW_CD_FILE:-}" ]; then
-        echo "$1" > "$GW_CD_FILE"
+    if [ -n "${GW_EVAL_FILE:-}" ]; then
+        signal_eval "cd $(printf '%q' "$1")"
     else
         echo "  cd $1"
     fi
 }
 
-# Get base directory name (strips --worktree suffix if present)
 get_base_name() {
     local dir="$1"
     if [[ "$dir" == *"--"* ]]; then
@@ -46,13 +69,48 @@ get_base_name() {
     fi
 }
 
-# Check if current worktree is the main one (no -- in name)
 is_main_worktree() {
     local git_root
     git_root=$(git rev-parse --show-toplevel)
     local current_dir
     current_dir=$(basename "$git_root")
     [[ "$current_dir" != *"--"* ]]
+}
+
+resolve_golden() {
+    local git_root
+    git_root=$(git rev-parse --show-toplevel)
+    local current_dir
+    current_dir=$(basename "$git_root")
+    local base_name
+    base_name=$(get_base_name "$current_dir")
+    local parent_dir
+    parent_dir=$(dirname "$git_root")
+    echo "${parent_dir}/${base_name}"
+}
+
+is_golden() {
+    local base_dir="$1"
+    [ "$(git -C "$base_dir" config --local --get gw.golden 2>/dev/null)" = "true" ]
+}
+
+overlay_dirs() {
+    local worktree_path="$1"
+    local repo_id
+    repo_id=$(basename "$(dirname "$worktree_path")")-$(basename "$worktree_path")
+    echo "${GW_OVERLAY_DIR}/${repo_id}"
+}
+
+overlay_service_name() {
+    local worktree_path="$1"
+    local repo_id
+    repo_id=$(basename "$(dirname "$worktree_path")")-$(basename "$worktree_path")
+    echo "gw-overlay-${repo_id}"
+}
+
+is_overlay_mounted() {
+    local path="$1"
+    mount | grep -q "fuse-overlayfs on ${path} "
 }
 
 run_install_quiet() {
@@ -77,6 +135,135 @@ run_install_quiet() {
         return 1
     fi
 }
+
+run_deps_install() {
+    local worktree_path="$1"
+    if [ -f "$worktree_path/pnpm-lock.yaml" ]; then
+        run_install_quiet "$worktree_path" "pnpm" pnpm install
+    elif [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
+        run_install_quiet "$worktree_path" "bun" bun install
+    elif [ -f "$worktree_path/package-lock.json" ]; then
+        run_install_quiet "$worktree_path" "npm" npm install
+    fi
+}
+
+# ── Overlay systemd helpers ──────────────────────────────────────────
+
+overlay_start_mount() {
+    local golden_dir="$1"
+    local worktree_path="$2"
+
+    local overlay_base
+    overlay_base=$(overlay_dirs "$worktree_path")
+    local upper="${overlay_base}/upper"
+    local work="${overlay_base}/work"
+
+    # Mount immediately (fast, ~3ms)
+    # allow_other lets Docker daemon (root) access the mount
+    fuse-overlayfs \
+        -o "lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other" \
+        "$worktree_path"
+
+    # Create systemd service for persistence across reboots (async-safe)
+    local service_name
+    service_name=$(overlay_service_name "$worktree_path")
+    local fuse_bin
+    fuse_bin=$(command -v fuse-overlayfs)
+    local fusermount_bin
+    fusermount_bin=$(command -v fusermount3)
+
+    mkdir -p "$GW_SYSTEMD_DIR"
+    cat > "${GW_SYSTEMD_DIR}/${service_name}.service" << EOF
+[Unit]
+Description=gw overlay: $(basename "$worktree_path")
+
+[Service]
+Type=forking
+ExecStart=${fuse_bin} -o lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other ${worktree_path}
+ExecStop=${fusermount_bin} -u ${worktree_path}
+
+[Install]
+WantedBy=default.target
+EOF
+
+    # Enable for boot (don't start — already mounted). Run in background.
+    (systemctl --user daemon-reload && systemctl --user enable "$service_name" --quiet) &
+}
+
+overlay_stop_mount() {
+    local worktree_path="$1"
+
+    local service_name
+    service_name=$(overlay_service_name "$worktree_path")
+
+    systemctl --user disable --now "$service_name" --quiet 2>/dev/null || true
+    rm -f "${GW_SYSTEMD_DIR}/${service_name}.service"
+    systemctl --user daemon-reload
+}
+
+# ── Overlay helpers ──────────────────────────────────────────────────
+
+overlay_create() {
+    local golden_dir="$1"
+    local worktree_path="$2"
+    local branch_name="$3"
+
+    local overlay_base
+    overlay_base=$(overlay_dirs "$worktree_path")
+    local upper="${overlay_base}/upper"
+    local work="${overlay_base}/work"
+
+    # 1. Create worktree with --no-checkout --detach (just the .git link, ~6ms)
+    git worktree add --no-checkout --detach "$worktree_path" HEAD 2>/dev/null
+
+    # 2. Read the .git link file content before we remove the dir
+    local git_link
+    git_link=$(cat "$worktree_path/.git")
+
+    # 3. Figure out the worktree git dir (where the index lives)
+    local wt_git_dir="${git_link#gitdir: }"
+
+    # 4. Copy golden's index to worktree index for instant git status
+    cp "${golden_dir}/.git/index" "${wt_git_dir}/index"
+
+    # 5. Set core.checkStat=minimal (overlay changes device numbers)
+    git -C "$worktree_path" config extensions.worktreeConfig true
+    git -C "$worktree_path" config --worktree core.checkStat minimal
+
+    # 6. Remove the empty checkout dir, recreate as mountpoint
+    rm -rf "$worktree_path"
+    mkdir -p "$worktree_path" "$upper" "$work"
+
+    # 7. Write .git link into upper so it appears in the overlay
+    echo "$git_link" > "$upper/.git"
+
+    # 8. Mount overlay via systemd (persists across reboots)
+    overlay_start_mount "$golden_dir" "$worktree_path"
+
+    # 9. Checkout the branch
+    (cd "$worktree_path" && git checkout "$branch_name" 2>/dev/null)
+}
+
+overlay_destroy() {
+    local worktree_path="$1"
+
+    local overlay_base
+    overlay_base=$(overlay_dirs "$worktree_path")
+    local golden_dir
+    golden_dir=$(resolve_golden)
+
+    # Disable systemd service (safe to do inline)
+    overlay_stop_mount "$worktree_path"
+
+    # FUSE cleanup must run in parent shell AFTER cd moves cwd away from mount
+    signal_eval "\
+fusermount3 -uz $(printf '%q' "$worktree_path") 2>/dev/null || true
+rmdir $(printf '%q' "$worktree_path") 2>/dev/null || true
+rm -rf $(printf '%q' "$overlay_base")
+git -C $(printf '%q' "$golden_dir") worktree prune 2>/dev/null || true"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
 
 cmd_create_from_base() {
     local base_ref="$1"
@@ -110,14 +297,13 @@ cmd_create_from_base() {
     parent_dir=$(dirname "$git_root")
 
     local branch_name
-    local worktree_path
     local is_existing_local=false
     local is_existing_remote=false
 
     if git show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
         branch_name="$name"
         is_existing_local=true
-    elif git ls-remote --heads origin "$name" 2>/dev/null | grep -q .; then
+    elif git show-ref --verify --quiet "refs/remotes/origin/$name" 2>/dev/null; then
         branch_name="$name"
         is_existing_remote=true
     else
@@ -125,31 +311,33 @@ cmd_create_from_base() {
     fi
 
     local safe_branch_name="${branch_name//\//-}"
-    worktree_path="${parent_dir}/${base_name}--${safe_branch_name}"
+    local worktree_path="${parent_dir}/${base_name}--${safe_branch_name}"
 
-    local base_dir
-    base_dir="${parent_dir}/${base_name}"
+    local base_dir="${parent_dir}/${base_name}"
 
     if [ -d "$worktree_path" ]; then
         echo "Error: Directory already exists: $worktree_path"
         exit 1
     fi
 
-    echo "Creating worktree..."
-
-    if [ "$is_existing_local" = true ]; then
-        git worktree add "$worktree_path" "$branch_name"
-    elif [ "$is_existing_remote" = true ]; then
-        git fetch origin "$branch_name:$branch_name" >/dev/null 2>&1 || true
-        if git show-ref --verify --quiet "refs/heads/$branch_name" 2>/dev/null; then
-            git worktree add "$worktree_path" "$branch_name"
-        else
-            git worktree add -b "$branch_name" "$worktree_path" "origin/$branch_name"
-        fi
-    else
-        git worktree add -b "$branch_name" "$worktree_path" "$base_ref"
+    # ── Ensure branch exists locally ────────────────────────────
+    if [ "$is_existing_remote" = true ] && [ "$is_existing_local" = false ]; then
+        git branch "$branch_name" "origin/$branch_name"
+    elif [ "$is_existing_local" = false ] && [ "$is_existing_remote" = false ]; then
+        git branch "$branch_name" "$base_ref"
     fi
 
+    # ── Create worktree ──────────────────────────────────────────
+    if is_golden "$base_dir"; then
+        echo "Creating overlay worktree..."
+        overlay_create "$base_dir" "$worktree_path" "$branch_name"
+    else
+        echo "Creating worktree..."
+        git worktree add "$worktree_path" "$branch_name"
+        run_deps_install "$worktree_path"
+    fi
+
+    # ── Common post-setup (works for both overlay and normal) ────
     if command -v direnv >/dev/null 2>&1; then
         direnv allow "$worktree_path" >/dev/null 2>&1 || true
     fi
@@ -170,14 +358,6 @@ cmd_create_from_base() {
 
     if [ -d "$base_dir/.pi" ] && [ ! -d "$worktree_path/.pi" ]; then
         cp -r "$base_dir/.pi" "$worktree_path/.pi"
-    fi
-
-    if [ -f "$worktree_path/pnpm-lock.yaml" ]; then
-        run_install_quiet "$worktree_path" "pnpm" pnpm install
-    elif [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
-        run_install_quiet "$worktree_path" "bun" bun install
-    elif [ -f "$worktree_path/package-lock.json" ]; then
-        run_install_quiet "$worktree_path" "npm" npm install
     fi
 
     echo "Worktree ready: $worktree_path"
@@ -235,6 +415,15 @@ cmd_delete() {
     fi
 
     echo "Deleting worktree: $worktree_path"
+
+    local changes
+    changes=$(cd "$worktree_path" && git status --porcelain 2>/dev/null || true)
+    if [ -n "$changes" ]; then
+        echo "⚠ WARNING: Worktree has uncommitted changes:"
+        echo "$changes" | head -20
+        echo ""
+    fi
+
     read -r -p "Are you sure? (y/N) " -n 1
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -245,17 +434,278 @@ cmd_delete() {
     local cd_target
     cd_target="$parent_dir/$base_name"
 
-    git worktree remove "$worktree_path" --force
-    echo "Worktree deleted"
-
+    # Signal cd BEFORE cleanup so parent shell moves away from mount first
     if [ "$worktree_path" = "$git_root" ]; then
         signal_cd "$cd_target"
     fi
+
+    # Overlay or normal teardown
+    if is_overlay_mounted "$worktree_path"; then
+        overlay_destroy "$worktree_path"
+    else
+        git worktree remove "$worktree_path" --force
+    fi
+
+    echo "Worktree deleted"
 }
 
 cmd_list() {
-    git worktree list
+    local git_root
+    git_root=$(git rev-parse --show-toplevel)
+    local base_name
+    base_name=$(get_base_name "$(basename "$git_root")")
+    local parent_dir
+    parent_dir=$(dirname "$git_root")
+    local base_dir="${parent_dir}/${base_name}"
+
+    echo "Worktrees:"
+    echo ""
+
+    git worktree list --porcelain | while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_path="${line#worktree }"
+            local wt_name
+            wt_name=$(basename "$wt_path")
+            local mode="normal"
+            local upper_size="-"
+
+            if is_overlay_mounted "$wt_path"; then
+                mode="overlay"
+                local overlay_base
+                overlay_base=$(overlay_dirs "$wt_path")
+                if [ -d "${overlay_base}/upper" ]; then
+                    upper_size=$(du -sh "${overlay_base}/upper" 2>/dev/null | cut -f1)
+                fi
+            fi
+
+            local branch_info=""
+            local dirty=""
+
+            branch_info=$(cd "$wt_path" 2>/dev/null && git branch --show-current 2>/dev/null || echo "(detached)")
+
+            if [ -d "$wt_path" ]; then
+                local changes
+                changes=$(cd "$wt_path" 2>/dev/null && git status --porcelain 2>/dev/null | head -1 || true)
+                if [ -n "$changes" ]; then
+                    dirty=" [dirty]"
+                fi
+            fi
+
+            if is_golden "$base_dir" && [[ "$wt_name" == "$base_name" ]]; then
+                printf "  %-50s %-20s %s\n" "$wt_path" "[golden]" "$branch_info"
+            elif [ "$mode" = "overlay" ]; then
+                printf "  %-50s %-20s %s%s\n" "$wt_path" "[overlay: ${upper_size}]" "$branch_info" "$dirty"
+            else
+                printf "  %-50s %-20s %s%s\n" "$wt_path" "" "$branch_info" "$dirty"
+            fi
+        fi
+    done
 }
+
+cmd_init_golden() {
+    local git_root
+    git_root=$(git rev-parse --show-toplevel)
+    local current_dir
+    current_dir=$(basename "$git_root")
+
+    if [[ "$current_dir" == *"--"* ]]; then
+        echo "Error: Run init-golden from the base repo, not a worktree"
+        exit 1
+    fi
+
+    if [ "$(git -C "$git_root" config --local --get gw.golden 2>/dev/null)" = "true" ]; then
+        echo "Already a golden repo: $git_root"
+        exit 0
+    fi
+
+    echo "Initializing golden repo: $git_root"
+
+    # Ensure lingering is enabled for persistent systemd user services
+    if ! loginctl show-user "$USER" --property=Linger 2>/dev/null | grep -q "yes"; then
+        echo "Enabling lingering for systemd user services..."
+        loginctl enable-linger "$USER" 2>/dev/null || \
+            echo "⚠ Could not enable lingering. Overlay mounts may not persist across reboots."
+    fi
+
+    # Detach HEAD so all branch names are free for worktrees
+    local main_ref
+    main_ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/||' || true)
+    if [ -z "$main_ref" ]; then
+        if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            main_ref="origin/main"
+        elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+            main_ref="origin/master"
+        else
+            main_ref="HEAD"
+        fi
+    fi
+    echo "Detaching HEAD at $main_ref..."
+    git checkout --detach "$main_ref"
+
+    echo "Installing dependencies..."
+    run_deps_install "$git_root"
+
+    git -C "$git_root" config --local gw.golden true
+
+    echo ""
+    echo "Golden ready! Worktrees created with 'gw new/fork' will now use overlayfs."
+    echo "Never work directly in this directory — use worktrees."
+}
+
+cmd_update_golden() {
+    local golden_dir
+    golden_dir=$(resolve_golden)
+
+    if ! is_golden "$golden_dir"; then
+        echo "Error: Not a golden repo. Run 'gw init-golden' first."
+        exit 1
+    fi
+
+    local base_name
+    base_name=$(basename "$golden_dir")
+
+    # 1. Fetch
+    echo "Fetching origin..."
+    (cd "$golden_dir" && git fetch origin)
+
+    local main_ref
+    main_ref=$(cd "$golden_dir" && git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/||' || true)
+    if [ -z "$main_ref" ]; then
+        if (cd "$golden_dir" && git rev-parse --verify origin/main >/dev/null 2>&1); then
+            main_ref="origin/main"
+        elif (cd "$golden_dir" && git rev-parse --verify origin/master >/dev/null 2>&1); then
+            main_ref="origin/master"
+        else
+            echo "Error: No remote origin found. Cannot update golden."
+            exit 1
+        fi
+    fi
+
+    # 2. Early exit if nothing to update
+    local new_head
+    new_head=$(cd "$golden_dir" && git rev-parse "$main_ref")
+    local old_head
+    old_head=$(cd "$golden_dir" && git rev-parse HEAD)
+
+    if [ "$new_head" = "$old_head" ]; then
+        echo "Golden already up to date."
+        return
+    fi
+
+    echo "$(cd "$golden_dir" && git log --oneline "$old_head".."$new_head" | wc -l) new commit(s)"
+
+    # 3. Pre-check: collect dirty overlay worktrees
+    local dirty_wts=()
+    while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_path="${line#worktree }"
+            [[ "$(basename "$wt_path")" == "$base_name" ]] && continue
+            is_overlay_mounted "$wt_path" || continue
+
+            local changes
+            changes=$(cd "$wt_path" && git status --porcelain 2>/dev/null || true)
+            if [ -n "$changes" ]; then
+                echo "  DIRTY: $(basename "$wt_path")"
+                echo "$changes" | head -5 | sed 's/^/    /'
+                dirty_wts+=("$wt_path")
+            fi
+        fi
+    done < <(git worktree list --porcelain)
+
+    if [ "${#dirty_wts[@]}" -gt 0 ]; then
+        echo ""
+        read -r -p "Stash changes in ${#dirty_wts[@]} dirty worktree(s) and continue? (y/N) " -n 1
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Aborted. Commit or stash manually, then retry."
+            exit 1
+        fi
+
+        for wt_path in "${dirty_wts[@]}"; do
+            local wt_name
+            wt_name=$(basename "$wt_path")
+            echo "  Stashing: $wt_name"
+            (cd "$wt_path" && git stash push -m "gw-update-golden:${wt_name}" --include-untracked --quiet)
+        done
+    fi
+
+    # 4. Update golden
+    echo "Updating golden..."
+    (cd "$golden_dir" && git checkout --detach "$main_ref" --quiet)
+
+    echo "Installing dependencies..."
+    run_deps_install "$golden_dir"
+
+    # 5. Reset behind worktrees so they don't show phantom changes
+    while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_path="${line#worktree }"
+            [[ "$(basename "$wt_path")" == "$base_name" ]] && continue
+            is_overlay_mounted "$wt_path" || continue
+
+            local branch
+            branch=$(cd "$wt_path" && git branch --show-current 2>/dev/null || echo "(detached)")
+
+            if ! (cd "$wt_path" && git merge-base --is-ancestor "$new_head" HEAD 2>/dev/null); then
+                echo "  Resetting: $(basename "$wt_path") ($branch)"
+                (cd "$wt_path" && git reset --hard --quiet)
+            fi
+        fi
+    done < <(git worktree list --porcelain)
+
+    # 6. Pop named stashes (order-independent)
+    for wt_path in "${dirty_wts[@]}"; do
+        local wt_name
+        wt_name=$(basename "$wt_path")
+        local stash_ref
+        stash_ref=$(cd "$wt_path" && git stash list | grep "gw-update-golden:${wt_name}$" | head -1 | cut -d: -f1)
+        if [ -n "$stash_ref" ]; then
+            echo "  Unstashing: $wt_name"
+            if ! (cd "$wt_path" && git stash pop "$stash_ref" --quiet 2>/dev/null); then
+                echo "    ⚠ Stash pop failed (conflicts?) — changes saved in: git stash show $stash_ref"
+            fi
+        fi
+    done
+
+    echo ""
+    echo "Golden updated to $(echo "$new_head" | cut -c1-8)."
+}
+
+cmd_shell_hook() {
+    local shell="${1:-}"
+    local gw_bin
+    gw_bin=$(command -v gw 2>/dev/null || echo "\$HOME/.local/bin/gw")
+
+    case "$shell" in
+        zsh|bash)
+            cat << HOOK
+gw() {
+  local evalfile=\$(mktemp)
+  trap "rm -f \$evalfile" EXIT
+  GW_EVAL_FILE="\$evalfile" "$gw_bin" "\$@"
+  local exit_code=\$?
+  [ -s "\$evalfile" ] && source "\$evalfile"
+  return \$exit_code
+}
+HOOK
+            ;;
+        "")
+            echo "Usage: gw shell-hook <shell>"
+            echo "Supported: zsh, bash"
+            echo ""
+            echo "Add to your rc file:"
+            echo '  eval "$(gw shell-hook zsh)"    # .zshrc'
+            echo '  eval "$(gw shell-hook bash)"   # .bashrc'
+            exit 1
+            ;;
+        *)
+            echo "Error: Unsupported shell '$shell'. Use 'zsh' or 'bash'."
+            exit 1
+            ;;
+    esac
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
     n|new)
@@ -271,7 +721,20 @@ case "${1:-}" in
         cmd_delete "$@"
         ;;
     l|list|ls)
+        shift || true
         cmd_list
+        ;;
+    ig|init-golden)
+        shift
+        cmd_init_golden
+        ;;
+    ug|update-golden)
+        shift
+        cmd_update_golden
+        ;;
+    shell-hook|sh)
+        shift
+        cmd_shell_hook "$@"
         ;;
     h|help|--help|-h)
         show_help
