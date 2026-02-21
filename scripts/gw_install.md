@@ -31,7 +31,7 @@ Mount command:
 
 ```
 fuse-overlayfs \
-  -o lowerdir=<pnpm-install>:<masking>:<golden>,upperdir=<upper>,workdir=<work>,allow_other,entry_timeout=0,attr_timeout=0,negative_timeout=0 \
+  -o lowerdir=<pnpm-install>:<masking>:<golden>,upperdir=<upper>,workdir=<work>,allow_other \
   <worktree>
 ```
 
@@ -45,8 +45,8 @@ overrides everything.
 ~/.local/share/gw/overlays/<repo-id>/
 ├── upper/           ← existing (user edits, copied-up files)
 ├── work/            ← existing (overlayfs internal)
-├── masking/         ← NEW (opaque node_modules dirs)
-└── pnpm-install/    ← NEW (hardlinked node_modules + package files)
+├── masking/         ← opaque node_modules dirs
+└── pnpm-install/    ← hardlinked node_modules + package files
 ```
 
 ## The two cases
@@ -84,11 +84,13 @@ Detected by checking whether the masking layer already has content.
    work. This is the starting point — identical to golden's deps, zero extra
    disk space.
 
-4. **Copy package files from overlay → pnpm-install layer** — copy
-   `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.npmrc`, and all
-   workspace `package.json` files from the merged overlay view (which has the
-   user's edits) into the pnpm-install layer. This gives pnpm the updated
-   dependency declarations.
+4. **Stage package files** — copy `package.json`, `pnpm-lock.yaml`,
+   `pnpm-workspace.yaml`, `.npmrc`, `patches/`, and all workspace
+   `package.json` files to a temp staging dir. On cold path, read from golden
+   directly (not the overlay — see "FUSE caching" below). On hot path, read
+   from the overlay (user may have edited files; overlay was remounted during
+   last install so its view is consistent). Move staged files into the
+   pnpm-install layer.
 
 5. **Run `pnpm install --ignore-scripts` in the pnpm-install layer** —
    executed directly in the `pnpm-install/` directory (NOT through the FUSE
@@ -96,10 +98,18 @@ Detected by checking whether the masking layer already has content.
    from its store. `--ignore-scripts` skips lifecycle scripts (postinstall etc.)
    because the pnpm-install layer doesn't have the full source tree.
 
-6. **Run `pnpm rebuild` in the overlay worktree** — executed through the FUSE
-   mount, where the full source tree is visible. Runs the lifecycle scripts
-   that were skipped. Any files written by scripts (compiled native modules
-   etc.) go to the upper layer via normal overlayfs copy-up.
+6. **Lazy remount** — `fusermount3 -uz` (detaches old mount, existing FDs
+   keep working) + fresh `fuse-overlayfs` mount on the same path. Required
+   because fuse-overlayfs caches lower-layer lookups internally — see
+   "FUSE caching" below.
+
+7. **Run `pnpm rebuild` in the overlay worktree** — executed through the
+   fresh FUSE mount, where the full source tree is visible. Runs the lifecycle
+   scripts that were skipped. Any files written by scripts (compiled native
+   modules etc.) go to the upper layer via normal overlayfs copy-up.
+
+8. **Signal `cd`** — writes `cd <worktree>` to `GW_EVAL_FILE` so the parent
+   shell moves onto the new mount (releasing its reference to the old one).
 
 #### Subsequent runs (hot — masking layer already has content)
 
@@ -108,33 +118,68 @@ the first run. No need to redo them — the pnpm-install layer already has its
 own `node_modules` (diverged from golden via previous installs). Only the
 package declarations need updating.
 
-1. **Copy package files from overlay → pnpm-install layer** — same as cold
-   step 4. Syncs `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
-   `.npmrc`, and all workspace `package.json` files.
+1. **Stage package files from overlay** — same as cold step 4, but reads from
+   the overlay mount (user's latest edits are visible because the last install
+   remounted). Staged to a temp dir first, then moved into pnpm-install
+   (avoids reading from the overlay after modifying the pnpm-install layer).
 
 2. **Run `pnpm install --ignore-scripts` in the pnpm-install layer** — same
    as cold step 5. pnpm does an incremental install: compares the updated
    lockfile/manifests against the existing `node_modules`, adds/removes/updates
    only what changed. Hardlinks from the store still work (same real fs).
 
-3. **Run `pnpm rebuild` in the overlay worktree** — same as cold step 6.
+3. **Lazy remount** — same as cold step 6.
+
+4. **Run `pnpm rebuild` in the overlay worktree** — same as cold step 7.
 
 This makes repeated `gw install` fast — no `cp -al` of the entire
 `node_modules` tree, no masking setup, just a lockfile sync + incremental
 pnpm install.
 
-## Why `timeout=0`
+## FUSE caching
 
-The masking and pnpm-install layers are populated **after** the overlay is
-already mounted (steps 2–5 write directly to those directories on disk, not
-through the mount). FUSE caches directory entries and attributes by default
-(~1s). With `timeout=0` (`entry_timeout=0,attr_timeout=0,negative_timeout=0`),
-the kernel doesn't cache FUSE responses, so changes to underlying layers are
-immediately visible through the mount. No remounting needed.
+fuse-overlayfs caches lower-layer lookups internally. The kernel also caches
+FUSE dentry/inode results. Changes to lower layers made directly on disk are
+NOT visible through the mount for already-cached entries.
 
-Trade-off: every file access goes through the FUSE daemon (no kernel cache).
-This adds latency to all file operations — slightly slower builds/dev servers.
-Can be tuned later if needed.
+### Cache invalidation strategy
+
+**Primary: `drop_caches` (with passwordless sudo)**
+
+```bash
+echo 2 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+```
+
+Drops the kernel dentry and inode caches. This forces the kernel to re-query
+fuse-overlayfs on next access, and fuse-overlayfs re-reads from the real
+filesystem. No remount needed — the mount stays intact, running dev servers
+keep their file descriptors, inotify watches remain active.
+
+Requires passwordless sudo. Tested: correctly invalidates all cached lookups
+including opaque markers, updated files, new files, and removed files.
+
+**Fallback: lazy remount (no passwordless sudo)**
+
+`fusermount3 -uz` + fresh mount. Old mount lingers for open FDs; new path
+lookups use the fresh mount. Dev servers need restart (file watches break).
+
+### Why not `timeout=0`?
+
+fuse-overlayfs accepts `timeout=0`, which disables kernel-side caching. But:
+- fuse-overlayfs's internal node cache still persists for already-accessed
+  entries (only new/never-accessed entries benefit)
+- Disabling kernel cache makes ALL file access ~5-10x slower (every
+  stat/open/readdir goes through FUSE userspace — cold install went from
+  ~20s to ~107s in testing)
+
+### Reading from layers during install
+
+- **Cold path**: reads package files from `$golden_dir` directly (not through
+  the overlay) since the overlay's cached view is stale after populating
+  masking/pnpm-install layers.
+- **Hot path**: reads from the overlay (consistent after previous cache
+  invalidation), staged to a temp dir BEFORE modifying the pnpm-install
+  layer to avoid reading stale data after layer changes.
 
 ## Why opaque dirs work
 
@@ -197,22 +242,32 @@ package whose `node_modules` the worktree also needs, the user runs
 | Never ran `gw install` (empty layers) | No change — golden's deps pass through as before |
 | Ran `gw install` (populated layers) | Sync masks to match golden's current `node_modules` dirs |
 
+## Performance (headroom/app — 36 workspace packages, 3.6G node_modules)
+
+| Operation | Time |
+|---|---|
+| `gw new` (overlay worktree creation) | ~0.3s |
+| `gw install` cold (first run) | ~20s |
+| `gw install` hot (subsequent) | ~13s |
+| `pnpm install` in non-overlay worktree | ~45s+ |
+
 ## Code changes
 
 ### Modified functions
 
 | Function | Change |
 |---|---|
-| `overlay_start_mount` | 3 lowerdirs instead of 1, add timeout options |
+| `overlay_start_mount` | 3 lowerdirs instead of 1 |
 | `overlay_create` | `mkdir` also creates `masking/` and `pnpm-install/` |
 | `overlay_destroy` | No change (`rm -rf $overlay_base` already cleans everything) |
 | `cmd_update_golden` | After golden update, sync masks for worktrees with populated masking layers |
-| systemd service | Updated `ExecStart` with new mount options |
+| systemd service | Updated `ExecStart` with 3 lowerdirs |
 | help text + dispatch | Add `install` / `i` command |
 
 ### New code
 
 - `cmd_install` — the main new function (cold/hot steps above)
+- `golden_node_modules_dirs` — finds top-level node_modules in golden
 - `sync_masks` — re-syncs masking layer to match golden's `node_modules` dirs
 - Filesystem check — verify golden and overlay dirs are on same device (for hardlinks)
 

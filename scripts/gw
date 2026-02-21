@@ -13,13 +13,14 @@ Usage:
   gw fork <name>          Create new worktree from current HEAD
   gw delete [name]        Delete current worktree (or named one)
   gw list                 List all worktrees
+  gw install              Overlay-aware dependency install (pnpm)
   gw init-golden          Set up current repo as overlay golden
   gw update-golden        Update golden to latest origin/main
   gw shell-hook <shell>   Print shell wrapper (add to .zshrc/.bashrc)
   gw help                 Show this help
 
 Aliases:
-  n=new, f=fork, d=delete, l=list, ig=init-golden, ug=update-golden, h=help
+  n=new, f=fork, d=delete, l=list, i=install, ig=init-golden, ug=update-golden, h=help
 
 Shell integration:
   eval "$(gw shell-hook zsh)"    # add to .zshrc
@@ -32,11 +33,17 @@ disk overhead. Mounts persist across reboots via systemd user services.
 Environment:
   GW_USER            Username prefix for new branches (default: $USER)
   GW_EVAL_FILE       If set, gw writes shell commands for the wrapper to eval
+  GW_CACHE_STRATEGY  How to invalidate FUSE cache after gw install:
+                       drop_caches — sudo echo 2 > /proc/sys/vm/drop_caches
+                       remount     — lazy unmount + remount (breaks dev servers)
+                       auto        — drop_caches if passwordless sudo, else remount
+                     (default: auto)
 
 Examples:
   gw init-golden                     # one-time setup
   gw new feature-auth                # overlay if golden, normal otherwise
   gw fork split-current-task
+  gw install                         # overlay-aware pnpm install
   gw delete
   gw update-golden                   # fetch main, reinstall deps
 EOF
@@ -157,11 +164,18 @@ overlay_start_mount() {
     overlay_base=$(overlay_dirs "$worktree_path")
     local upper="${overlay_base}/upper"
     local work="${overlay_base}/work"
+    local masking="${overlay_base}/masking"
+    local pnpm_install="${overlay_base}/pnpm-install"
+
+    # lowerdir order: left = highest priority among lowers
+    # pnpm-install overrides masking, masking overrides golden
+    # upper overrides everything
+    local lowerdirs="${pnpm_install}:${masking}:${golden_dir}"
 
     # Mount immediately (fast, ~3ms)
     # allow_other lets Docker daemon (root) access the mount
     fuse-overlayfs \
-        -o "lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other" \
+        -o "lowerdir=${lowerdirs},upperdir=${upper},workdir=${work},allow_other" \
         "$worktree_path"
 
     # Create systemd service for persistence across reboots (async-safe)
@@ -179,7 +193,7 @@ Description=gw overlay: $(basename "$worktree_path")
 
 [Service]
 Type=forking
-ExecStart=${fuse_bin} -o lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other ${worktree_path}
+ExecStart=${fuse_bin} -o lowerdir=${lowerdirs},upperdir=${upper},workdir=${work},allow_other ${worktree_path}
 ExecStop=${fusermount_bin} -u ${worktree_path}
 
 [Install]
@@ -231,8 +245,10 @@ overlay_create() {
     git -C "$worktree_path" config --worktree core.checkStat minimal
 
     # 6. Remove the empty checkout dir, recreate as mountpoint
+    local masking="${overlay_base}/masking"
+    local pnpm_install="${overlay_base}/pnpm-install"
     rm -rf "$worktree_path"
-    mkdir -p "$worktree_path" "$upper" "$work"
+    mkdir -p "$worktree_path" "$upper" "$work" "$masking" "$pnpm_install"
 
     # 7. Write .git link into upper so it appears in the overlay
     echo "$git_link" > "$upper/.git"
@@ -261,6 +277,242 @@ fusermount3 -uz $(printf '%q' "$worktree_path") 2>/dev/null || true
 rmdir $(printf '%q' "$worktree_path") 2>/dev/null || true
 rm -rf $(printf '%q' "$overlay_base")
 git -C $(printf '%q' "$golden_dir") worktree prune 2>/dev/null || true"
+}
+
+# ── Overlay install helpers ───────────────────────────────────────────
+
+golden_node_modules_dirs() {
+    # Find top-level node_modules dirs in golden (not nested inside other node_modules)
+    local golden_dir="$1"
+    find "$golden_dir" -name node_modules -not -path '*/node_modules/*' -type d 2>/dev/null
+}
+
+sync_masks() {
+    # Rebuild masking layer to match golden's current node_modules dirs
+    local golden_dir="$1"
+    local masking_dir="$2"
+
+    rm -rf "${masking_dir:?}"/*
+
+    while IFS= read -r nm_dir; do
+        local rel_path="${nm_dir#"$golden_dir"/}"
+        mkdir -p "${masking_dir}/${rel_path}"
+        touch "${masking_dir}/${rel_path}/.wh..wh..opq"
+    done < <(golden_node_modules_dirs "$golden_dir")
+}
+
+cmd_install() {
+    local git_root
+    git_root=$(git rev-parse --show-toplevel)
+
+    if ! is_overlay_mounted "$git_root"; then
+        echo "Not an overlay worktree. Running normal install..."
+        run_deps_install "$git_root"
+        return
+    fi
+
+    local golden_dir
+    golden_dir=$(resolve_golden)
+
+    if ! is_golden "$golden_dir"; then
+        echo "Error: Golden repo not found at $golden_dir"
+        exit 1
+    fi
+
+    # Only pnpm is supported for overlay install
+    if [ ! -f "$git_root/pnpm-lock.yaml" ]; then
+        echo "Error: gw install only supports pnpm (no pnpm-lock.yaml found)"
+        echo "For other package managers, run install directly."
+        exit 1
+    fi
+
+    if ! command -v pnpm >/dev/null 2>&1; then
+        echo "Error: pnpm not found"
+        exit 1
+    fi
+
+    # Verify golden and overlay dirs are on the same device (for hardlinks)
+    local overlay_base
+    overlay_base=$(overlay_dirs "$git_root")
+    local golden_dev
+    golden_dev=$(stat -c %d "$golden_dir")
+    local overlay_dev
+    overlay_dev=$(stat -c %d "$overlay_base")
+    if [ "$golden_dev" != "$overlay_dev" ]; then
+        echo "Error: Golden ($golden_dir) and overlay storage ($overlay_base) are on different filesystems."
+        echo "Hardlinks won't work across filesystem boundaries."
+        exit 1
+    fi
+
+    local upper="${overlay_base}/upper"
+    local masking="${overlay_base}/masking"
+    local pnpm_install="${overlay_base}/pnpm-install"
+
+    # Detect cold vs hot: masking layer has content?
+    local is_cold=true
+    if [ -n "$(ls -A "$masking" 2>/dev/null)" ]; then
+        is_cold=false
+    fi
+
+    if [ "$is_cold" = true ]; then
+        echo "First install (cold path)..."
+
+        # Step 1: Clean upper layer's node_modules
+        echo "  Cleaning upper node_modules..."
+        # Remove actual node_modules dirs from upper
+        find "$upper" -name node_modules -not -path '*/node_modules/*' -type d -exec rm -rf {} + 2>/dev/null || true
+        # Remove whiteout files for node_modules from upper
+        find "$upper" -name '.wh.node_modules' -exec rm -f {} + 2>/dev/null || true
+
+        # Step 2: Create opaque dirs in masking layer
+        echo "  Creating masks for golden node_modules..."
+        sync_masks "$golden_dir" "$masking"
+
+        # Step 3: Hardlink golden's node_modules → pnpm-install layer
+        echo "  Hardlinking golden node_modules..."
+        while IFS= read -r nm_dir; do
+            local rel_path="${nm_dir#"$golden_dir"/}"
+            local parent_rel
+            parent_rel=$(dirname "$rel_path")
+            mkdir -p "${pnpm_install}/${parent_rel}"
+            cp -al "$nm_dir" "${pnpm_install}/${rel_path}"
+        done < <(golden_node_modules_dirs "$golden_dir")
+    else
+        echo "Subsequent install (hot path)..."
+    fi
+
+    # Common steps (both cold and hot)
+
+    # Copy package files → pnpm-install layer.
+    # Cold path: read from golden (overlay FUSE daemon has stale cache after
+    # layer modifications in cold steps 1-3).
+    # Hot path: read from overlay BEFORE modifying pnpm-install (once we
+    # write to pnpm-install, the FUSE daemon's cached view becomes stale).
+    # Stage everything to a temp dir first, then move into pnpm-install.
+    local src_root="$git_root"
+    if [ "$is_cold" = true ]; then
+        src_root="$golden_dir"
+    fi
+
+    echo "  Syncing package files..."
+    local stage_dir
+    stage_dir=$(mktemp -d -t "gw-stage-XXXXXX")
+    trap "rm -rf '$stage_dir'" EXIT
+
+    for f in package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc; do
+        if [ -f "$src_root/$f" ]; then
+            cp "$src_root/$f" "$stage_dir/$f"
+        fi
+    done
+
+    # Copy patches dir (pnpm resolves patch paths relative to project root)
+    if [ -d "$src_root/patches" ]; then
+        cp -r "$src_root/patches" "$stage_dir/patches"
+    fi
+
+    # Copy workspace package.json files
+    if [ -f "$src_root/pnpm-workspace.yaml" ]; then
+        # Parse workspace packages from pnpm-workspace.yaml
+        # Look for lines like "  - 'packages/*'" or "  - packages/*"
+        local workspace_globs
+        workspace_globs=$(sed -n '/^packages:/,/^[^ ]/{ /^  *- /{ s/^  *- *//; s/['\''"]//g; p; } }' "$src_root/pnpm-workspace.yaml")
+
+        while IFS= read -r glob; do
+            [ -z "$glob" ] && continue
+            # Expand glob against the source root
+            for pkg_dir in $src_root/$glob; do
+                [ -d "$pkg_dir" ] || continue
+                if [ -f "$pkg_dir/package.json" ]; then
+                    local rel_pkg="${pkg_dir#"$src_root"/}"
+                    mkdir -p "${stage_dir}/${rel_pkg}"
+                    cp "$pkg_dir/package.json" "${stage_dir}/${rel_pkg}/package.json"
+                fi
+            done
+        done <<< "$workspace_globs"
+    fi
+
+    # Now move staged files into pnpm-install layer
+    for f in package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc; do
+        [ -f "$stage_dir/$f" ] && mv "$stage_dir/$f" "$pnpm_install/$f"
+    done
+    if [ -d "$stage_dir/patches" ]; then
+        rm -rf "$pnpm_install/patches"
+        mv "$stage_dir/patches" "$pnpm_install/patches"
+    fi
+    # Move workspace package.json files
+    find "$stage_dir" -name package.json -not -path "$stage_dir/package.json" 2>/dev/null | while IFS= read -r staged_pkg; do
+        local rel="${staged_pkg#"$stage_dir"/}"
+        mkdir -p "$(dirname "$pnpm_install/$rel")"
+        mv "$staged_pkg" "$pnpm_install/$rel"
+    done
+    rm -rf "$stage_dir"
+    trap - EXIT
+
+    # Run pnpm install in pnpm-install layer (real fs — hardlinks work)
+    echo "  Running pnpm install (in pnpm-install layer)..."
+    local log_file
+    log_file=$(mktemp -t "gw-pnpm-install-XXXXXX.log")
+
+    if (cd "$pnpm_install" && pnpm install --ignore-scripts) >"$log_file" 2>&1; then
+        rm -f "$log_file"
+        echo "  pnpm install done"
+    else
+        echo "  pnpm install failed (log: $log_file)"
+        tail -n 40 "$log_file" || true
+        return 1
+    fi
+
+    # Resolve cache invalidation strategy
+    local strategy="${GW_CACHE_STRATEGY:-auto}"
+    if [ "$strategy" = "auto" ]; then
+        if sudo -n true 2>/dev/null; then
+            strategy="drop_caches"
+        else
+            strategy="remount"
+        fi
+    fi
+
+    # Invalidate fuse-overlayfs's cached lookups. fuse-overlayfs caches
+    # lower-layer entries internally; the kernel dentry/inode cache is what
+    # keeps the FUSE daemon from being re-queried. Dropping it forces the
+    # kernel to re-ask fuse-overlayfs, which then re-reads from disk.
+    case "$strategy" in
+        drop_caches)
+            echo "  Dropping kernel dentry cache..."
+            echo 2 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+            ;;
+        remount)
+            echo "  Remounting overlay (lazy)..."
+            cd /
+            fusermount3 -uz "$git_root"
+            overlay_start_mount "$golden_dir" "$git_root"
+            cd "$git_root"
+            ;;
+        *)
+            echo "Error: Unknown GW_CACHE_STRATEGY '$strategy' (use: drop_caches, remount, auto)"
+            exit 1
+            ;;
+    esac
+
+    # Run pnpm rebuild in the overlay worktree (full source tree visible)
+    echo "  Running pnpm rebuild (in worktree)..."
+    log_file=$(mktemp -t "gw-pnpm-rebuild-XXXXXX.log")
+
+    if (cd "$git_root" && pnpm rebuild) >"$log_file" 2>&1; then
+        rm -f "$log_file"
+        echo "  pnpm rebuild done"
+    else
+        echo "  pnpm rebuild failed (log: $log_file)"
+        tail -n 40 "$log_file" || true
+        return 1
+    fi
+
+    if [ "$strategy" = "remount" ]; then
+        signal_cd "$git_root"
+        echo "⚠ Overlay was remounted. Restart any running dev servers in this worktree."
+    fi
+
+    echo "Install complete."
 }
 
 # ── Commands ─────────────────────────────────────────────────────────
@@ -636,6 +888,24 @@ cmd_update_golden() {
     echo "Installing dependencies..."
     run_deps_install "$golden_dir"
 
+    # 4b. Sync masks for worktrees that have a populated masking layer
+    while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_path="${line#worktree }"
+            [[ "$(basename "$wt_path")" == "$base_name" ]] && continue
+            is_overlay_mounted "$wt_path" || continue
+
+            local wt_overlay_base
+            wt_overlay_base=$(overlay_dirs "$wt_path")
+            local wt_masking="${wt_overlay_base}/masking"
+
+            if [ -d "$wt_masking" ] && [ -n "$(ls -A "$wt_masking" 2>/dev/null)" ]; then
+                echo "  Syncing masks: $(basename "$wt_path")"
+                sync_masks "$golden_dir" "$wt_masking"
+            fi
+        fi
+    done < <(git worktree list --porcelain)
+
     # 5. Reset behind worktrees so they don't show phantom changes
     while IFS= read -r line; do
         if [[ "$line" == "worktree "* ]]; then
@@ -723,6 +993,10 @@ case "${1:-}" in
     l|list|ls)
         shift || true
         cmd_list
+        ;;
+    i|install)
+        shift
+        cmd_install
         ;;
     ig|init-golden)
         shift
