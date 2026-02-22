@@ -96,16 +96,23 @@ Detected by checking whether the pnpm-install layer already has content.
    executed directly in the `pnpm-install/` directory (NOT through the FUSE
    mount). Since this directory is on the real filesystem, pnpm can hardlink
    from its store. `--ignore-scripts` skips lifecycle scripts (postinstall etc.)
-   because the pnpm-install layer doesn't have the full source tree.
+   because the pnpm-install layer doesn't have the full source tree. pnpm
+   internally marks these packages as "pending rebuild."
 
 5. **Invalidate FUSE cache** — either `drop_caches` (preferred) or lazy
    remount (fallback). Required because fuse-overlayfs caches lower-layer
    lookups internally — see "FUSE caching" below.
 
-6. **Run `pnpm rebuild` in the overlay worktree** — executed through the
-   fresh view, where the full source tree is visible. Runs the lifecycle
-   scripts that were skipped. Any files written by scripts (compiled native
-   modules etc.) go to the upper layer via normal overlayfs copy-up.
+6. **Run `pnpm rebuild --pending` in the overlay worktree** — executed through
+   the fresh view, where the full source tree is visible. The `--pending` flag
+   tells pnpm to only rebuild packages that were installed with
+   `--ignore-scripts` in step 4 — i.e., packages that pnpm actually added or
+   updated. Packages from the golden (copied via `cp -al` in step 2) are NOT
+   pending because the golden installed them with scripts enabled during
+   `init-golden`. This skips all of golden's pre-built native modules (esbuild,
+   swc, protobufjs, bufferutil, ssh2, etc.) and only builds truly new
+   dependencies. Any files written by scripts (compiled native modules etc.)
+   go to the upper layer via normal overlayfs copy-up.
 
 7. **Signal `cd`** — if remount strategy was used, writes `cd <worktree>` to
    `GW_EVAL_FILE` so the parent shell moves onto the new mount.
@@ -130,10 +137,36 @@ package declarations need updating.
 
 3. **Invalidate FUSE cache** — same as cold step 5.
 
-4. **Run `pnpm rebuild` in the overlay worktree** — same as cold step 6.
+4. **Run `pnpm rebuild --pending` in the overlay worktree** — same as cold
+   step 6. Only rebuilds packages added/updated in step 2.
 
 This makes repeated `gw install` fast — no `cp -al` of the entire
 `node_modules` tree, no setup, just a lockfile sync + incremental pnpm install.
+
+## Why `--pending` instead of `pnpm rebuild`
+
+`pnpm rebuild` (without `--pending`) runs lifecycle scripts for ALL packages
+that have them — including native modules already built in the golden
+(esbuild, bufferutil, ssh2, protobufjs, etc.). On a real monorepo (3286
+packages) this takes ~6s and redundantly recompiles native code.
+
+`pnpm rebuild --pending` only rebuilds packages that pnpm internally marked
+as needing a rebuild — specifically, packages installed with `--ignore-scripts`.
+Since the golden's `node_modules` were installed with scripts enabled (during
+`init-golden`) and hard-linked into the pnpm-install layer via `cp -al`, pnpm
+does NOT mark them as pending. Only packages that pnpm actually added or
+updated during `pnpm install --ignore-scripts` are pending.
+
+Tested on headroom (37 workspace packages, 3286 deps):
+
+| Scenario | `pnpm rebuild` | `pnpm rebuild --pending` |
+|---|---|---|
+| No dep changes | ~6.2s (rebuilds all native) | ~0.5s (project scripts only) |
+| Added one native dep | ~6.2s | ~1.3s (only new dep + project) |
+
+The `--pending` state persists in pnpm's internal metadata (`node_modules/.modules.yaml`
+or similar), so it survives across separate `pnpm install` and `pnpm rebuild`
+invocations.
 
 ## FUSE caching
 

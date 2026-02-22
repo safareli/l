@@ -492,15 +492,17 @@ cmd_install() {
             ;;
     esac
 
-    # Run pnpm rebuild in the overlay worktree (full source tree visible)
-    echo "  Running pnpm rebuild (in worktree)..."
+    # Run pnpm rebuild --pending in the overlay worktree (full source tree visible)
+    # --pending only rebuilds packages installed with --ignore-scripts above,
+    # skipping golden's pre-built native modules (esbuild, swc, etc.)
+    echo "  Running pnpm rebuild --pending (in worktree)..."
     log_file=$(mktemp -t "gw-pnpm-rebuild-XXXXXX.log")
 
-    if (cd "$git_root" && pnpm rebuild) >"$log_file" 2>&1; then
+    if (cd "$git_root" && pnpm rebuild --pending) >"$log_file" 2>&1; then
         rm -f "$log_file"
-        echo "  pnpm rebuild done"
+        echo "  pnpm rebuild --pending done"
     else
-        echo "  pnpm rebuild failed (log: $log_file)"
+        echo "  pnpm rebuild --pending failed (log: $log_file)"
         tail -n 40 "$log_file" || true
         return 1
     fi
