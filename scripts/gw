@@ -164,13 +164,11 @@ overlay_start_mount() {
     overlay_base=$(overlay_dirs "$worktree_path")
     local upper="${overlay_base}/upper"
     local work="${overlay_base}/work"
-    local masking="${overlay_base}/masking"
     local pnpm_install="${overlay_base}/pnpm-install"
 
     # lowerdir order: left = highest priority among lowers
-    # pnpm-install overrides masking, masking overrides golden
-    # upper overrides everything
-    local lowerdirs="${pnpm_install}:${masking}:${golden_dir}"
+    # pnpm-install overrides golden, upper overrides everything
+    local lowerdirs="${pnpm_install}:${golden_dir}"
 
     # Mount immediately (fast, ~3ms)
     # allow_other lets Docker daemon (root) access the mount
@@ -245,10 +243,9 @@ overlay_create() {
     git -C "$worktree_path" config --worktree core.checkStat minimal
 
     # 6. Remove the empty checkout dir, recreate as mountpoint
-    local masking="${overlay_base}/masking"
     local pnpm_install="${overlay_base}/pnpm-install"
     rm -rf "$worktree_path"
-    mkdir -p "$worktree_path" "$upper" "$work" "$masking" "$pnpm_install"
+    mkdir -p "$worktree_path" "$upper" "$work" "$pnpm_install"
 
     # 7. Write .git link into upper so it appears in the overlay
     echo "$git_link" > "$upper/.git"
@@ -287,17 +284,22 @@ golden_node_modules_dirs() {
     find "$golden_dir" -name node_modules -not -path '*/node_modules/*' -type d 2>/dev/null
 }
 
-sync_masks() {
-    # Rebuild masking layer to match golden's current node_modules dirs
+ensure_opaque_markers() {
+    # Sync opaque markers in target layer to match golden's node_modules dirs.
+    # Removes stale markers (from node_modules dirs golden no longer has),
+    # creates missing ones. Equivalent to a full wipe + recreate but only
+    # touches the marker files.
     local golden_dir="$1"
-    local masking_dir="$2"
+    local target_dir="$2"
 
-    rm -rf "${masking_dir:?}"/*
+    # Remove all existing opaque markers
+    find "$target_dir" -name '.wh..wh..opq' -delete 2>/dev/null || true
 
+    # Create markers for current golden node_modules dirs
     while IFS= read -r nm_dir; do
         local rel_path="${nm_dir#"$golden_dir"/}"
-        mkdir -p "${masking_dir}/${rel_path}"
-        touch "${masking_dir}/${rel_path}/.wh..wh..opq"
+        mkdir -p "${target_dir}/${rel_path}"
+        touch "${target_dir}/${rel_path}/.wh..wh..opq"
     done < <(golden_node_modules_dirs "$golden_dir")
 }
 
@@ -345,12 +347,11 @@ cmd_install() {
     fi
 
     local upper="${overlay_base}/upper"
-    local masking="${overlay_base}/masking"
     local pnpm_install="${overlay_base}/pnpm-install"
 
-    # Detect cold vs hot: masking layer has content?
+    # Detect cold vs hot: pnpm-install layer has content?
     local is_cold=true
-    if [ -n "$(ls -A "$masking" 2>/dev/null)" ]; then
+    if [ -n "$(ls -A "$pnpm_install" 2>/dev/null)" ]; then
         is_cold=false
     fi
 
@@ -364,11 +365,7 @@ cmd_install() {
         # Remove whiteout files for node_modules from upper
         find "$upper" -name '.wh.node_modules' -exec rm -f {} + 2>/dev/null || true
 
-        # Step 2: Create opaque dirs in masking layer
-        echo "  Creating masks for golden node_modules..."
-        sync_masks "$golden_dir" "$masking"
-
-        # Step 3: Hardlink golden's node_modules → pnpm-install layer
+        # Step 2: Hardlink golden's node_modules → pnpm-install layer + add opaque markers
         echo "  Hardlinking golden node_modules..."
         while IFS= read -r nm_dir; do
             local rel_path="${nm_dir#"$golden_dir"/}"
@@ -376,6 +373,7 @@ cmd_install() {
             parent_rel=$(dirname "$rel_path")
             mkdir -p "${pnpm_install}/${parent_rel}"
             cp -al "$nm_dir" "${pnpm_install}/${rel_path}"
+            touch "${pnpm_install}/${rel_path}/.wh..wh..opq"
         done < <(golden_node_modules_dirs "$golden_dir")
     else
         echo "Subsequent install (hot path)..."
@@ -385,7 +383,7 @@ cmd_install() {
 
     # Copy package files → pnpm-install layer.
     # Cold path: read from golden (overlay FUSE daemon has stale cache after
-    # layer modifications in cold steps 1-3).
+    # layer modifications in cold steps 1-2).
     # Hot path: read from overlay BEFORE modifying pnpm-install (once we
     # write to pnpm-install, the FUSE daemon's cached view becomes stale).
     # Stage everything to a temp dir first, then move into pnpm-install.
@@ -888,7 +886,7 @@ cmd_update_golden() {
     echo "Installing dependencies..."
     run_deps_install "$golden_dir"
 
-    # 4b. Sync masks for worktrees that have a populated masking layer
+    # 4b. Ensure opaque markers for worktrees that have run gw install
     while IFS= read -r line; do
         if [[ "$line" == "worktree "* ]]; then
             local wt_path="${line#worktree }"
@@ -897,11 +895,11 @@ cmd_update_golden() {
 
             local wt_overlay_base
             wt_overlay_base=$(overlay_dirs "$wt_path")
-            local wt_masking="${wt_overlay_base}/masking"
+            local wt_pnpm_install="${wt_overlay_base}/pnpm-install"
 
-            if [ -d "$wt_masking" ] && [ -n "$(ls -A "$wt_masking" 2>/dev/null)" ]; then
-                echo "  Syncing masks: $(basename "$wt_path")"
-                sync_masks "$golden_dir" "$wt_masking"
+            if [ -d "$wt_pnpm_install" ] && [ -n "$(ls -A "$wt_pnpm_install" 2>/dev/null)" ]; then
+                echo "  Syncing opaque markers: $(basename "$wt_path")"
+                ensure_opaque_markers "$golden_dir" "$wt_pnpm_install"
             fi
         fi
     done < <(git worktree list --porcelain)

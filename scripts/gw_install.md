@@ -9,7 +9,7 @@ don't cross filesystem boundaries. So if you run `pnpm install` inside an
 overlay worktree (e.g., after changing `package.json`), pnpm can't hardlink —
 it falls back to copying, wasting disk and time.
 
-## Solution: 4-layer overlay with `gw install`
+## Solution: 3-layer overlay with `gw install`
 
 ### Layer structure
 
@@ -19,9 +19,7 @@ Priority (high → low):
 ┌──────────────────────────────────────────────────┐
 │  upper        (worktree — user edits, writable)  │
 ├──────────────────────────────────────────────────┤
-│  pnpm-install (node_modules from pnpm install)   │  ← real fs, hardlinks work
-├──────────────────────────────────────────────────┤
-│  masking      (opaque dirs hiding golden's n_m)  │
+│  pnpm-install (node_modules + opaque markers)    │  ← real fs, hardlinks work
 ├──────────────────────────────────────────────────┤
 │  golden       (read-only shared base)            │
 └──────────────────────────────────────────────────┘
@@ -31,13 +29,18 @@ Mount command:
 
 ```
 fuse-overlayfs \
-  -o lowerdir=<pnpm-install>:<masking>:<golden>,upperdir=<upper>,workdir=<work>,allow_other \
+  -o lowerdir=<pnpm-install>:<golden>,upperdir=<upper>,workdir=<work>,allow_other \
   <worktree>
 ```
 
 The `lowerdir` order is left-to-right = highest-to-lowest priority among
-lowers. So pnpm-install overrides masking, masking overrides golden. Upper
-overrides everything.
+lowers. So pnpm-install overrides golden. Upper overrides everything.
+
+The pnpm-install layer serves a dual role: it holds hardlinked `node_modules`
+(so pnpm can hardlink from its store on the real filesystem) and contains
+opaque markers (`.wh..wh..opq`) that hide golden's `node_modules` from
+bleeding through. This works because opaque markers only block merging with
+**lower** layers — they don't hide contents in the **same** layer.
 
 ### Directory layout
 
@@ -45,46 +48,43 @@ overrides everything.
 ~/.local/share/gw/overlays/<repo-id>/
 ├── upper/           ← existing (user edits, copied-up files)
 ├── work/            ← existing (overlayfs internal)
-├── masking/         ← opaque node_modules dirs
-└── pnpm-install/    ← hardlinked node_modules + package files
+└── pnpm-install/    ← hardlinked node_modules + opaque markers + package files
 ```
 
 ## The two cases
 
 ### Case 1: Normal worktree creation (`gw new` / `gw fork`)
 
-No changes to existing behavior. Masking and pnpm-install layers are created
-empty. Since they're empty, all file lookups pass straight through to golden.
-Golden's `node_modules` are visible. Everything works exactly as before —
-super fast.
+No changes to existing behavior. The pnpm-install layer is created empty.
+Since it's empty, all file lookups pass straight through to golden. Golden's
+`node_modules` are visible. Everything works exactly as before — super fast.
 
 ### Case 2: User modifies `package.json` → runs `gw install`
 
 New command. Has two modes: **first run** (cold) and **subsequent runs** (hot).
-Detected by checking whether the masking layer already has content.
+Detected by checking whether the pnpm-install layer already has content.
 
-#### First run (cold — masking layer is empty)
+#### First run (cold — pnpm-install layer is empty)
 
 1. **Clean upper layer's `node_modules`** — remove any `node_modules` dirs
    (and whiteout files) from the upper layer. Prevents stale upper entries
    from shadowing the pnpm-install layer.
 
-2. **Create opaque dirs in masking layer** — for every `node_modules` dir in
-   golden (top-level + workspace packages, found via
-   `find golden -name node_modules -not -path '*/node_modules/*'`), create the
-   same directory in the masking layer and place a `.wh..wh..opq` file inside
-   it. This is the standard overlayfs opaque marker — it tells fuse-overlayfs:
-   "when merging directory contents, stop here — don't look into golden for
-   this directory." Golden's `node_modules` become invisible through the
-   overlay. No extra tools needed — just `mkdir -p` + `touch`.
+2. **Hardlink golden's `node_modules` → pnpm-install layer + add opaque
+   markers** — for every `node_modules` dir in golden (top-level + workspace
+   packages, found via `find golden -name node_modules -not -path
+   '*/node_modules/*'`), `cp -al` (archive + hardlink) it into the
+   pnpm-install layer. Since both are on the real filesystem (same partition),
+   hardlinks work. Then place a `.wh..wh..opq` file inside each
+   `node_modules` dir in pnpm-install. This is the standard overlayfs opaque
+   marker — it tells fuse-overlayfs: "when merging directory contents, stop
+   here — don't look into golden for this directory." Golden's `node_modules`
+   become invisible through the overlay, while pnpm-install's own
+   `node_modules` contents remain fully visible (opaque markers only block
+   **lower** layers, not the same layer). No extra tools needed — just
+   `mkdir -p` + `touch`.
 
-3. **Hardlink golden's `node_modules` → pnpm-install layer** — `cp -al`
-   (archive + hardlink) each `node_modules` from golden into the pnpm-install
-   layer. Since both are on the real filesystem (same partition), hardlinks
-   work. This is the starting point — identical to golden's deps, zero extra
-   disk space.
-
-4. **Stage package files** — copy `package.json`, `pnpm-lock.yaml`,
+3. **Stage package files** — copy `package.json`, `pnpm-lock.yaml`,
    `pnpm-workspace.yaml`, `.npmrc`, `patches/`, and all workspace
    `package.json` files to a temp staging dir. On cold path, read from golden
    directly (not the overlay — see "FUSE caching" below). On hot path, read
@@ -92,49 +92,48 @@ Detected by checking whether the masking layer already has content.
    last install so its view is consistent). Move staged files into the
    pnpm-install layer.
 
-5. **Run `pnpm install --ignore-scripts` in the pnpm-install layer** —
+4. **Run `pnpm install --ignore-scripts` in the pnpm-install layer** —
    executed directly in the `pnpm-install/` directory (NOT through the FUSE
    mount). Since this directory is on the real filesystem, pnpm can hardlink
    from its store. `--ignore-scripts` skips lifecycle scripts (postinstall etc.)
    because the pnpm-install layer doesn't have the full source tree.
 
-6. **Lazy remount** — `fusermount3 -uz` (detaches old mount, existing FDs
-   keep working) + fresh `fuse-overlayfs` mount on the same path. Required
-   because fuse-overlayfs caches lower-layer lookups internally — see
-   "FUSE caching" below.
+5. **Invalidate FUSE cache** — either `drop_caches` (preferred) or lazy
+   remount (fallback). Required because fuse-overlayfs caches lower-layer
+   lookups internally — see "FUSE caching" below.
 
-7. **Run `pnpm rebuild` in the overlay worktree** — executed through the
-   fresh FUSE mount, where the full source tree is visible. Runs the lifecycle
+6. **Run `pnpm rebuild` in the overlay worktree** — executed through the
+   fresh view, where the full source tree is visible. Runs the lifecycle
    scripts that were skipped. Any files written by scripts (compiled native
    modules etc.) go to the upper layer via normal overlayfs copy-up.
 
-8. **Signal `cd`** — writes `cd <worktree>` to `GW_EVAL_FILE` so the parent
-   shell moves onto the new mount (releasing its reference to the old one).
+7. **Signal `cd`** — if remount strategy was used, writes `cd <worktree>` to
+   `GW_EVAL_FILE` so the parent shell moves onto the new mount.
 
-#### Subsequent runs (hot — masking layer already has content)
+#### Subsequent runs (hot — pnpm-install layer already has content)
 
-The masking layer and hardlinked `node_modules` base are already in place from
-the first run. No need to redo them — the pnpm-install layer already has its
-own `node_modules` (diverged from golden via previous installs). Only the
+The hardlinked `node_modules` base and opaque markers are already in place
+from the first run. No need to redo them — the pnpm-install layer already has
+its own `node_modules` (diverged from golden via previous installs). Only the
 package declarations need updating.
 
-1. **Stage package files from overlay** — same as cold step 4, but reads from
+1. **Stage package files from overlay** — same as cold step 3, but reads from
    the overlay mount (user's latest edits are visible because the last install
-   remounted). Staged to a temp dir first, then moved into pnpm-install
-   (avoids reading from the overlay after modifying the pnpm-install layer).
+   invalidated the cache). Staged to a temp dir first, then moved into
+   pnpm-install (avoids reading from the overlay after modifying the
+   pnpm-install layer).
 
 2. **Run `pnpm install --ignore-scripts` in the pnpm-install layer** — same
-   as cold step 5. pnpm does an incremental install: compares the updated
+   as cold step 4. pnpm does an incremental install: compares the updated
    lockfile/manifests against the existing `node_modules`, adds/removes/updates
    only what changed. Hardlinks from the store still work (same real fs).
 
-3. **Lazy remount** — same as cold step 6.
+3. **Invalidate FUSE cache** — same as cold step 5.
 
-4. **Run `pnpm rebuild` in the overlay worktree** — same as cold step 7.
+4. **Run `pnpm rebuild` in the overlay worktree** — same as cold step 6.
 
 This makes repeated `gw install` fast — no `cp -al` of the entire
-`node_modules` tree, no masking setup, just a lockfile sync + incremental
-pnpm install.
+`node_modules` tree, no setup, just a lockfile sync + incremental pnpm install.
 
 ## FUSE caching
 
@@ -175,22 +174,25 @@ fuse-overlayfs accepts `timeout=0`, which disables kernel-side caching. But:
 ### Reading from layers during install
 
 - **Cold path**: reads package files from `$golden_dir` directly (not through
-  the overlay) since the overlay's cached view is stale after populating
-  masking/pnpm-install layers.
+  the overlay) since the overlay's cached view is stale after populating the
+  pnpm-install layer.
 - **Hot path**: reads from the overlay (consistent after previous cache
   invalidation), staged to a temp dir BEFORE modifying the pnpm-install
   layer to avoid reading stale data after layer changes.
 
-## Why opaque dirs work
+## Why opaque markers work in the pnpm-install layer
 
 In overlayfs, when multiple layers have the same directory, their contents are
-**merged**. An opaque directory says "stop merging here." So:
+**merged**. An opaque directory says "stop merging here." Critically, the
+opaque marker only blocks merging with **lower** layers — it does not hide
+contents in the same layer or above.
+
+So with `lowerdir=<pnpm-install>:<golden>`:
 
 - Listing `node_modules/` collects entries from:
-  upper → pnpm-install → masking (opaque, STOP).
-  Golden's `node_modules` entries are never included.
-- pnpm-install has higher priority than masking, so its `node_modules`
-  contents are visible even though masking's `node_modules` is opaque.
+  upper → pnpm-install (opaque, STOP — golden's entries excluded).
+- pnpm-install's own `node_modules` contents are fully visible (opaque
+  markers are directional — they block downward, not the current layer).
 - The opaque marker is a `.wh..wh..opq` file inside the directory — the
   standard overlayfs convention. fuse-overlayfs honors it in lower layers.
   No xattr tools needed — just `mkdir` + `touch`.
@@ -210,37 +212,42 @@ works fine. When it removes a package, only the pnpm-install link is removed
 ## Interaction with `update-golden`
 
 After `update-golden`, the set of `node_modules` directories in golden may
-have changed (new workspace package added, old one removed). Worktrees with
-a populated masking layer need their masks re-synced, otherwise:
+have changed (new workspace package added, old one removed). Worktrees that
+have run `gw install` (populated pnpm-install layer) need their opaque markers
+updated, otherwise:
 
 - **New `node_modules` in golden, not masked** → golden's version bleeds
-  through alongside the pnpm-install layer's content. Inconsistent.
-- **Removed `node_modules` in golden, still masked** → harmless but stale.
+  through alongside pnpm-install's content. Inconsistent.
+- **Removed `node_modules` in golden, still masked** → harmless (opaque marker
+  for a non-existent lower dir is a no-op).
 
-### Mask sync during `update-golden`
+### Opaque marker sync during `update-golden`
 
 After updating golden (step 4 in the existing flow) and before resetting
 behind worktrees (step 5), `update-golden` iterates overlay worktrees that
-have a populated masking layer and rebuilds them:
+have a populated pnpm-install layer and ensures opaque markers exist for all
+of golden's current `node_modules` dirs:
 
-1. `rm -rf masking/*` — wipe the entire masking layer.
-2. Recreate opaque dirs for golden's current `node_modules` set
-   (`mkdir -p` + `touch .wh..wh..opq` for each).
+```bash
+ensure_opaque_markers "$golden_dir" "$wt_pnpm_install"
+```
 
-The masking layer is tiny (just empty dirs with marker files), so a full
-clear + recreate is simpler and faster than diffing. No `cp -al`, no pnpm.
+This is additive — `mkdir -p` + `touch .wh..wh..opq` for each golden
+`node_modules` dir. Existing content in pnpm-install is preserved. New dirs
+get created with opaque markers. Stale markers (for dirs golden removed) are
+harmless and left in place.
 
-The pnpm-install layer is NOT updated — it still has the worktree's own
-`node_modules` from the last `gw install`. If golden added a new workspace
-package whose `node_modules` the worktree also needs, the user runs
+The pnpm-install layer's `node_modules` contents are NOT updated — they still
+have the worktree's own deps from the last `gw install`. If golden added a new
+workspace package whose `node_modules` the worktree also needs, the user runs
 `gw install` again (hot path).
 
 ### Summary by worktree state
 
 | Worktree state | `update-golden` behavior |
 |---|---|
-| Never ran `gw install` (empty layers) | No change — golden's deps pass through as before |
-| Ran `gw install` (populated layers) | Sync masks to match golden's current `node_modules` dirs |
+| Never ran `gw install` (empty pnpm-install) | No change — golden's deps pass through as before |
+| Ran `gw install` (populated pnpm-install) | Add opaque markers for any new golden `node_modules` dirs |
 
 ## Performance (headroom/app — 36 workspace packages, 3.6G node_modules)
 
@@ -257,23 +264,23 @@ package whose `node_modules` the worktree also needs, the user runs
 
 | Function | Change |
 |---|---|
-| `overlay_start_mount` | 3 lowerdirs instead of 1 |
-| `overlay_create` | `mkdir` also creates `masking/` and `pnpm-install/` |
+| `overlay_start_mount` | 2 lowerdirs instead of 1 |
+| `overlay_create` | `mkdir` also creates `pnpm-install/` |
 | `overlay_destroy` | No change (`rm -rf $overlay_base` already cleans everything) |
-| `cmd_update_golden` | After golden update, sync masks for worktrees with populated masking layers |
-| systemd service | Updated `ExecStart` with 3 lowerdirs |
+| `cmd_update_golden` | After golden update, ensure opaque markers for worktrees with populated pnpm-install |
+| systemd service | Updated `ExecStart` with 2 lowerdirs |
 | help text + dispatch | Add `install` / `i` command |
 
 ### New code
 
 - `cmd_install` — the main new function (cold/hot steps above)
 - `golden_node_modules_dirs` — finds top-level node_modules in golden
-- `sync_masks` — re-syncs masking layer to match golden's `node_modules` dirs
+- `ensure_opaque_markers` — adds opaque markers in target layer for golden's `node_modules` dirs
 - Filesystem check — verify golden and overlay dirs are on same device (for hardlinks)
 
 ### Unchanged
 
-- `gw new` / `gw fork` — same speed, same behavior (empty intermediate layers
-  are transparent)
+- `gw new` / `gw fork` — same speed, same behavior (empty pnpm-install layer
+  is transparent)
 - `gw delete` — same cleanup (`rm -rf $overlay_base` covers new dirs)
 - Non-overlay worktrees — unaffected

@@ -53,10 +53,12 @@ worktrees.
 ~/.local/share/gw/overlays/
 ├── dev-app--main/
 │   ├── upper/                     ← only files you edit
-│   └── work/                      ← overlayfs internal
+│   ├── work/                      ← overlayfs internal
+│   └── pnpm-install/              ← hardlinked node_modules (after gw install)
 ├── dev-app--feature-auth/
 │   ├── upper/
-│   └── work/
+│   ├── work/
+│   └── pnpm-install/
 └── ...
 ```
 
