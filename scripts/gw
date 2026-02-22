@@ -67,14 +67,6 @@ signal_cd() {
     fi
 }
 
-get_base_name() {
-    local dir="$1"
-    if [[ "$dir" == *"--"* ]]; then
-        echo "${dir%%--*}"
-    else
-        echo "$dir"
-    fi
-}
 
 is_main_worktree() {
     local git_root
@@ -86,13 +78,13 @@ is_main_worktree() {
 resolve_golden() {
     local git_root
     git_root=$(git rev-parse --show-toplevel)
-    local current_dir
-    current_dir=$(basename "$git_root")
-    local base_name
-    base_name=$(get_base_name "$current_dir")
-    local parent_dir
-    parent_dir=$(dirname "$git_root")
-    echo "${parent_dir}/${base_name}"
+    local git_common_dir
+    git_common_dir=$(cd "$git_root" && git rev-parse --git-common-dir)
+    # git-common-dir may be relative to git_root; resolve to absolute
+    if [[ "$git_common_dir" != /* ]]; then
+        git_common_dir="${git_root}/${git_common_dir}"
+    fi
+    dirname "$git_common_dir"
 }
 
 is_golden() {
@@ -535,17 +527,14 @@ cmd_create_from_base() {
         exit 1
     fi
 
-    local git_root
-    git_root=$(git rev-parse --show-toplevel)
-
-    local current_dir
-    current_dir=$(basename "$git_root")
+    local base_dir
+    base_dir=$(resolve_golden)
 
     local base_name
-    base_name=$(get_base_name "$current_dir")
+    base_name=$(basename "$base_dir")
 
     local parent_dir
-    parent_dir=$(dirname "$git_root")
+    parent_dir=$(dirname "$base_dir")
 
     local branch_name
     local is_existing_local=false
@@ -563,8 +552,6 @@ cmd_create_from_base() {
 
     local safe_branch_name="${branch_name//\//-}"
     local worktree_path="${parent_dir}/${base_name}--${safe_branch_name}"
-
-    local base_dir="${parent_dir}/${base_name}"
 
     if [ -d "$worktree_path" ]; then
         echo "Error: Directory already exists: $worktree_path"
@@ -631,14 +618,14 @@ cmd_delete() {
     local git_root
     git_root=$(git rev-parse --show-toplevel)
 
-    local current_dir
-    current_dir=$(basename "$git_root")
+    local base_dir
+    base_dir=$(resolve_golden)
 
     local base_name
-    base_name=$(get_base_name "$current_dir")
+    base_name=$(basename "$base_dir")
 
     local parent_dir
-    parent_dir=$(dirname "$git_root")
+    parent_dir=$(dirname "$base_dir")
 
     local worktree_path
 
@@ -681,7 +668,7 @@ cmd_delete() {
     fi
 
     local cd_target
-    cd_target="$parent_dir/$base_name"
+    cd_target="$base_dir"
 
     # Signal cd BEFORE cleanup so parent shell moves away from mount first
     if [ "$worktree_path" = "$git_root" ]; then
@@ -699,13 +686,10 @@ cmd_delete() {
 }
 
 cmd_list() {
-    local git_root
-    git_root=$(git rev-parse --show-toplevel)
+    local base_dir
+    base_dir=$(resolve_golden)
     local base_name
-    base_name=$(get_base_name "$(basename "$git_root")")
-    local parent_dir
-    parent_dir=$(dirname "$git_root")
-    local base_dir="${parent_dir}/${base_name}"
+    base_name=$(basename "$base_dir")
 
     echo "Worktrees:"
     echo ""
