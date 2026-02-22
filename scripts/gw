@@ -79,9 +79,8 @@ get_base_name() {
 is_main_worktree() {
     local git_root
     git_root=$(git rev-parse --show-toplevel)
-    local current_dir
-    current_dir=$(basename "$git_root")
-    [[ "$current_dir" != *"--"* ]]
+    # Main worktree has .git as a directory; linked worktrees have .git as a file
+    [ -d "$git_root/.git" ]
 }
 
 resolve_golden() {
@@ -659,9 +658,7 @@ cmd_delete() {
         fi
     fi
 
-    local target_dir
-    target_dir=$(basename "$worktree_path")
-    if [[ "$target_dir" != *"--"* ]]; then
+    if [ -d "$worktree_path/.git" ]; then
         echo "Error: Cannot delete main worktree"
         exit 1
     fi
