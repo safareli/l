@@ -55,6 +55,9 @@ let
     ln -s ${piper-voice-en.json} $out/en_US-lessac-medium.onnx.json
   '';
 
+  # Fast parallel hard-link directory copy tool
+  cpal = pkgs.callPackage ./scripts/cpal { };
+
   # Shared env vars exported in both bash and zsh shell init
   # NOTE: These are ALSO added to home.sessionVariables (see below) so that
   # non-interactive shells (e.g. agents, VS Code tasks) can see them.
@@ -132,6 +135,7 @@ in
 
     # Filesystem tools
     fuse-overlayfs     # Rootless overlayfs (used by fast-wt)
+    cpal               # Fast parallel hard-link directory copy (local C tool)
 
     # Nix tools
     nil                # Nix LSP
