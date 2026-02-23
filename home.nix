@@ -442,6 +442,11 @@ in
     executable = true;
   };
 
+  home.file.".local/bin/gw0" = {
+    source = ./scripts/gw0;
+    executable = true;
+  };
+
   home.file.".local/bin/brave-search" = {
     text = ''
       #!/usr/bin/env bash
