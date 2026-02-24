@@ -615,6 +615,13 @@ cmd_init_golden() {
         git -C "$git_root" config --local gw.pnpmStorePath "$(pnpm store path | xargs dirname)"
     fi
 
+    # Add .pnpm-store to local exclude so it doesn't show in git status
+    local exclude_file="$git_root/.git/info/exclude"
+    mkdir -p "$(dirname "$exclude_file")"
+    if ! grep -qxF '.pnpm-store' "$exclude_file" 2>/dev/null; then
+        echo '.pnpm-store' >> "$exclude_file"
+    fi
+
     log "Golden ready! Worktrees created with 'gw new/fork' will now use overlayfs."
     echo "  Never work directly in this directory — use worktrees."
 }
