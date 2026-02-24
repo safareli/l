@@ -8,22 +8,24 @@
  *   C io_uring (7 workers)         1.38s  -- batching hurt by per-dir flush
  *   C lock-free, 1 worker          2.30s
  *   C lock-free, 4 workers         1.20s
- *   C lock-free, 7 workers         1.17s  <-- best real copy, 2x faster
+ *   C lock-free, 7 workers         1.17s
+ *   C v2 work-stealing, 7 workers  1.56s  -- mutex overhead > parallelism gain
+ *   C v3 single-pass, 7 workers    ???s
  *   fuse-overlayfs                 0.02s  <-- instant, but CoW not real copy
+ *
+ * v3: single-pass getdents64 (no lseek + re-read for subdirs).
+ *   Keeps v1's lock-free top-level dispatch (atomic counter).
+ *   Within each subtree, buffer subdir fd pairs during the single scan
+ *   pass, then recurse. Eliminates ~35k redundant lseek + getdents64.
  *
  * Key optimizations:
  *   - getdents64 syscall directly (skips libc readdir overhead)
  *   - linkat/mkdirat with fds (no path string building)
  *   - Atomic counter for task dispatch (zero lock contention)
  *   - Top-level dirs as tasks = natural load balancing
+ *   - Single-pass dir scan: files linked + subdirs opened in one read
  *
- * Approaches tried but slower:
- *   - io_uring: batches linkat but must flush per-dir (FDs close), net loss
- *   - 3286 threads (one per top-level dir): thread spawn overhead > mutex cost
- *   - Python pure os.walk+os.link: interpreter overhead at 228K files
- *
- *
- * Usage: ./hardlink_copy <src> <dst> [nworkers]
+ * Usage: ./cpal <src> <dst> [nworkers]
  *   default nworkers = max(1, cpu_count - 1)
  */
 
@@ -55,46 +57,64 @@ static inline int sys_getdents64(int fd, void *buf, unsigned len) {
     return syscall(SYS_getdents64, fd, buf, len);
 }
 
-/* ---- recursive hardlink (single dir, called per-thread) ---- */
+/* ---- recursive hardlink (single-pass) ---- */
+
+struct fdpair { int sfd; int dfd; };
 
 static void hardlink_tree(int src_fd, int dst_fd) {
     char buf[32768];
     int n;
 
-    /* first pass: hardlink all files */
+    /* Stack-allocated buffer for subdirs; heap-fallback for wide dirs */
+    struct fdpair stack_subs[32];
+    struct fdpair *subs = stack_subs;
+    int nsubs = 0, subcap = 32;
+
+    /* Single pass: link files, collect subdir fd pairs */
     while ((n = sys_getdents64(src_fd, buf, sizeof(buf))) > 0) {
         int pos = 0;
         while (pos < n) {
             struct linux_dirent64 *d = (void *)(buf + pos);
             pos += d->d_reclen;
-            if (d->d_type != DT_DIR)
+
+            if (d->d_type == DT_DIR) {
+                const char *name = d->d_name;
+                if (name[0] == '.' && (name[1] == '\0' ||
+                    (name[1] == '.' && name[2] == '\0')))
+                    continue;
+
+                mkdirat(dst_fd, name, 0755);
+                int sfd = openat(src_fd, name, O_RDONLY | O_DIRECTORY);
+                int dfd = openat(dst_fd, name, O_RDONLY | O_DIRECTORY);
+                if (sfd >= 0 && dfd >= 0) {
+                    if (nsubs >= subcap) {
+                        int newcap = subcap * 2;
+                        if (subs == stack_subs) {
+                            subs = malloc(newcap * sizeof(*subs));
+                            memcpy(subs, stack_subs, nsubs * sizeof(*subs));
+                        } else {
+                            subs = realloc(subs, newcap * sizeof(*subs));
+                        }
+                        subcap = newcap;
+                    }
+                    subs[nsubs++] = (struct fdpair){sfd, dfd};
+                } else {
+                    if (sfd >= 0) close(sfd);
+                    if (dfd >= 0) close(dfd);
+                }
+            } else {
                 linkat(src_fd, d->d_name, dst_fd, d->d_name, 0);
+            }
         }
     }
 
-    /* rewind */
-    lseek(src_fd, 0, SEEK_SET);
-
-    /* second pass: recurse into subdirs */
-    while ((n = sys_getdents64(src_fd, buf, sizeof(buf))) > 0) {
-        int pos = 0;
-        while (pos < n) {
-            struct linux_dirent64 *d = (void *)(buf + pos);
-            pos += d->d_reclen;
-            if (d->d_type != DT_DIR) continue;
-            const char *name = d->d_name;
-            if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
-                continue;
-
-            mkdirat(dst_fd, name, 0755);
-            int sfd = openat(src_fd, name, O_RDONLY | O_DIRECTORY);
-            int dfd = openat(dst_fd, name, O_RDONLY | O_DIRECTORY);
-            if (sfd >= 0 && dfd >= 0)
-                hardlink_tree(sfd, dfd);
-            if (sfd >= 0) close(sfd);
-            if (dfd >= 0) close(dfd);
-        }
+    /* Recurse into buffered subdirs */
+    for (int i = 0; i < nsubs; i++) {
+        hardlink_tree(subs[i].sfd, subs[i].dfd);
+        close(subs[i].sfd);
+        close(subs[i].dfd);
     }
+    if (subs != stack_subs) free(subs);
 }
 
 /* ---- top-level parallel dispatch ---- */
