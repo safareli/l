@@ -238,10 +238,28 @@ overlay_create() {
     # 8. Set up pnpm virtual store on real filesystem (bypasses FUSE, hardlinks work)
     local pnpm_vstore="${overlay_base}/.pnpm"
 
-    # 9. Move .pnpm from golden (instant rename) and restore golden's copy in background
-    #    flock serializes concurrent gw new/fork: second caller blocks until
-    #    the first's background cpal finishes restoring golden's .pnpm.
-    #    Lock is held by the background child (inherited fd) until cpal completes.
+    # 9. Shadow golden's node_modules/.pnpm with symlink to real fs in upper
+    #    (dangling until step 13 moves .pnpm; overlay sees symlink, not lower's .pnpm)
+    mkdir -p "${upper}/node_modules"
+    ln -s "$pnpm_vstore" "${upper}/node_modules/.pnpm"
+
+    # 10. Mount overlay via systemd (persists across reboots)
+    log "Mounting overlay..."
+    overlay_start_mount "$golden_dir" "$worktree_path"
+
+    # 11. Checkout the branch (before cpal starts, so no I/O competition on FUSE reads)
+    log "Checking out $branch_name..."
+    (cd "$worktree_path" && git checkout "$branch_name" 2>/dev/null)
+
+    # 12. Symlink .pnpm-store to global store (same device as .pnpm, hardlinks work)
+    local pnpm_global_store
+    pnpm_global_store="$(git -C "$golden_dir" config --local --get gw.pnpmStorePath)"
+    ln -s "$pnpm_global_store" "$worktree_path/.pnpm-store"
+
+    # 13. Move .pnpm from golden (instant rename) and restore golden's copy in background
+    #     flock serializes concurrent gw new/fork: second caller blocks until
+    #     the first's background cpal finishes restoring golden's .pnpm.
+    #     Lock is held by the background child (inherited fd) until cpal completes.
     local golden_pnpm_lock="${golden_dir}/node_modules/.pnpm.lock"
     exec {pnpm_lock_fd}>"$golden_pnpm_lock"
     flock "$pnpm_lock_fd"
@@ -251,25 +269,11 @@ overlay_create() {
     (cpal "$pnpm_vstore" "${golden_dir}/node_modules/.pnpm"; chmod u+w "$pnpm_vstore") &
     exec {pnpm_lock_fd}>&-  # release parent's fd; child's fd keeps lock until cpal done
 
-    # 10. Shadow golden's node_modules/.pnpm with symlink to real fs
-    mkdir -p "${upper}/node_modules"
-    ln -s "$pnpm_vstore" "${upper}/node_modules/.pnpm"
-
-    # 11. Mount overlay via systemd (persists across reboots)
-    log "Mounting overlay..."
-    overlay_start_mount "$golden_dir" "$worktree_path"
-
-    # 12. Checkout the branch
-    log "Checking out $branch_name..."
-    (cd "$worktree_path" && git checkout "$branch_name" 2>/dev/null)
-
-    # 13. Symlink .pnpm-store to global store (same device as .pnpm, hardlinks work)
-    local pnpm_global_store
-    pnpm_global_store="$(git -C "$golden_dir" config --local --get gw.pnpmStorePath)"
-    ln -s "$pnpm_global_store" "$worktree_path/.pnpm-store"
-
     # 14. Update storeDir in .modules.yaml to point to worktree's .pnpm-store
-    sed -i "s|\"storeDir\": \".*\"|\"storeDir\": \"${worktree_path}/.pnpm-store/v10\"|" \
+    #     Handle both YAML (storeDir: ...) and JSON ("storeDir": "...") formats
+    sed -i \
+        -e "s|^storeDir: .*|storeDir: ${worktree_path}/.pnpm-store/v10|" \
+        -e "s|\"storeDir\": \".*\"|\"storeDir\": \"${worktree_path}/.pnpm-store/v10\"|" \
         "$worktree_path/node_modules/.modules.yaml"
 }
 
