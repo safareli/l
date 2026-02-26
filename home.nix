@@ -67,6 +67,11 @@ let
     WHISPER_MODEL_PATH = "${whisper-model-small-en}";
     PIPER_VOICES_DIR = "${piper-voices}";
     PIPER_BIN = "${piper-tts-lite}/bin/piper";
+
+    # Default editors (used by sudoedit, git, etc.)
+    EDITOR = "${pkgs.nano}/bin/nano";
+    VISUAL = "${pkgs.nano}/bin/nano";
+    SUDO_EDITOR = "${pkgs.nano}/bin/nano";
   };
 
   # Convert attrset to shell export lines
@@ -400,6 +405,11 @@ in
   # ============================================================================
   home.file.".vscode-server/data/Machine/settings.json".text = builtins.toJSON {
     "terminal.integrated.defaultProfile.linux" = "zsh";
+    "terminal.integrated.env.linux" = {
+      VISUAL = "code --wait";
+      GIT_EDITOR = "code --wait";
+      SUDO_EDITOR = "code --wait";
+    };
     "remote.autoForwardPorts" = false;
     "remote.autoForwardPortsSource" = "process";
     "remote.forwardOnOpen" = false;
