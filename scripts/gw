@@ -27,12 +27,15 @@ Shell integration:
   eval "$(gw shell-hook bash)"   # add to .bashrc
 
 When the base repo is initialized as golden (gw.golden=true in git config),
-new/fork use fuse-overlayfs for instant (~25ms) worktree creation with zero
-disk overhead. Mounts persist across reboots via systemd user services.
+new/fork use overlayfs with automatic backend selection:
+  - kernel overlayfs via sudo (if passwordless sudo is available)
+  - fuse-overlayfs (sudoless fallback)
+Mounts persist across reboots via systemd user services.
 
 Environment:
   GW_USER            Username prefix for new branches (default: $USER)
   GW_EVAL_FILE       If set, gw writes shell commands for the wrapper to eval
+  GW_OVERLAY_MODE    auto (default), sudo, or sudoless
 
 Examples:
   gw init-golden                     # one-time setup
@@ -104,9 +107,70 @@ overlay_service_name() {
     echo "gw-overlay-${repo_id}"
 }
 
+has_passwordless_sudo() {
+    command -v sudo >/dev/null 2>&1 || return 1
+    sudo -n true >/dev/null 2>&1
+}
+
+resolve_overlay_mode() {
+    local requested="${GW_OVERLAY_MODE:-auto}"
+
+    case "$requested" in
+        auto)
+            if has_passwordless_sudo; then
+                echo "sudo"
+            else
+                echo "sudoless"
+            fi
+            ;;
+        sudo)
+            if ! has_passwordless_sudo; then
+                echo "Error: GW_OVERLAY_MODE=sudo requires passwordless sudo (sudo -n)." >&2
+                exit 1
+            fi
+            echo "sudo"
+            ;;
+        sudoless|fuse)
+            echo "sudoless"
+            ;;
+        *)
+            echo "Error: Invalid GW_OVERLAY_MODE='$requested' (expected: auto|sudo|sudoless)." >&2
+            exit 1
+            ;;
+    esac
+}
+
+resolve_fusermount_bin() {
+    if command -v fusermount3 >/dev/null 2>&1; then
+        command -v fusermount3
+    elif command -v fusermount >/dev/null 2>&1; then
+        command -v fusermount
+    else
+        return 1
+    fi
+}
+
+overlay_mount_backend() {
+    local path="$1"
+    local fs_type
+    fs_type=$(findmnt -n -o FSTYPE --target "$path" 2>/dev/null || true)
+
+    case "$fs_type" in
+        overlay)
+            echo "sudo"
+            ;;
+        fuse.overlayfs|fuse-overlayfs|fuse.fuse-overlayfs)
+            echo "sudoless"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 is_overlay_mounted() {
     local path="$1"
-    mount | grep -q "fuse-overlayfs on ${path} "
+    overlay_mount_backend "$path" >/dev/null 2>&1
 }
 
 run_install_quiet() {
@@ -155,22 +219,73 @@ overlay_start_mount() {
     local upper="${overlay_base}/upper"
     local work="${overlay_base}/work"
 
-    # Mount immediately (fast, ~3ms)
-    # allow_other lets Docker daemon (root) access the mount
-    fuse-overlayfs \
-        -o "lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other" \
-        "$worktree_path"
+    local mode
+    mode=$(resolve_overlay_mode)
 
     # Create systemd service for persistence across reboots (async-safe)
     local service_name
     service_name=$(overlay_service_name "$worktree_path")
-    local fuse_bin
-    fuse_bin=$(command -v fuse-overlayfs)
-    local fusermount_bin
-    fusermount_bin=$(command -v fusermount3)
 
     mkdir -p "$GW_SYSTEMD_DIR"
-    cat > "${GW_SYSTEMD_DIR}/${service_name}.service" << EOF
+
+    case "$mode" in
+        sudo)
+            local sudo_bin
+            sudo_bin=$(command -v sudo)
+            local mount_bin
+            mount_bin=$(command -v mount || true)
+            local umount_bin
+            umount_bin=$(command -v umount || true)
+
+            if [ -z "$mount_bin" ] || [ -z "$umount_bin" ]; then
+                echo "Error: mount/umount not found for GW_OVERLAY_MODE=sudo."
+                exit 1
+            fi
+
+            log "Overlay backend: kernel (sudo)"
+
+            "$sudo_bin" -n "$mount_bin" -t overlay overlay \
+                -o "lowerdir=${golden_dir},upperdir=${upper},workdir=${work}" \
+                "$worktree_path"
+
+            cat > "${GW_SYSTEMD_DIR}/${service_name}.service" << EOF
+[Unit]
+Description=gw overlay: $(basename "$worktree_path")
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${sudo_bin} -n ${mount_bin} -t overlay overlay -o lowerdir=${golden_dir},upperdir=${upper},workdir=${work} ${worktree_path}
+ExecStop=${sudo_bin} -n ${umount_bin} -l ${worktree_path}
+
+[Install]
+WantedBy=default.target
+EOF
+            ;;
+        sudoless)
+            local fuse_bin
+            fuse_bin=$(command -v fuse-overlayfs || true)
+            local fusermount_bin
+            fusermount_bin=$(resolve_fusermount_bin || true)
+
+            if [ -z "$fuse_bin" ]; then
+                echo "Error: fuse-overlayfs not found for sudoless mode."
+                echo "Install fuse-overlayfs or enable passwordless sudo for kernel overlayfs."
+                exit 1
+            fi
+
+            if [ -z "$fusermount_bin" ]; then
+                echo "Error: fusermount3/fusermount not found for sudoless mode."
+                exit 1
+            fi
+
+            log "Overlay backend: fuse-overlayfs (sudoless)"
+
+            "$fuse_bin" \
+                -o "lowerdir=${golden_dir},upperdir=${upper},workdir=${work},allow_other" \
+                "$worktree_path"
+
+            cat > "${GW_SYSTEMD_DIR}/${service_name}.service" << EOF
 [Unit]
 Description=gw overlay: $(basename "$worktree_path")
 
@@ -182,6 +297,8 @@ ExecStop=${fusermount_bin} -u ${worktree_path}
 [Install]
 WantedBy=default.target
 EOF
+            ;;
+    esac
 
     # Enable for boot (don't start — already mounted). Run in background.
     (systemctl --user daemon-reload && systemctl --user enable "$service_name" --quiet) &
@@ -235,7 +352,7 @@ overlay_create() {
     # 7. Write .git link into upper so it appears in the overlay
     echo "$git_link" > "$upper/.git"
 
-    # 8. Set up pnpm virtual store on real filesystem (bypasses FUSE, hardlinks work)
+    # 8. Set up pnpm virtual store on real filesystem (hardlinks work)
     local pnpm_vstore="${overlay_base}/.pnpm"
 
     # 9. Shadow golden's node_modules/.pnpm with symlink to real fs in upper
@@ -247,9 +364,10 @@ overlay_create() {
     log "Mounting overlay..."
     overlay_start_mount "$golden_dir" "$worktree_path"
 
-    # 11. Checkout the branch (before cpal starts, so no I/O competition on FUSE reads)
+    # 11. Checkout the branch (before cpal starts, minimizing I/O contention)
     log "Checking out $branch_name..."
-    (cd "$worktree_path" && git checkout "$branch_name" 2>/dev/null)
+    # Force checkout so overlay stat differences don't preserve lowerdir content as local mods
+    (cd "$worktree_path" && git checkout --quiet --force "$branch_name")
 
     # 12. Symlink .pnpm-store to global store (same device as .pnpm, hardlinks work)
     local pnpm_global_store
@@ -285,15 +403,44 @@ overlay_destroy() {
     local golden_dir
     golden_dir=$(resolve_golden)
 
+    local mount_backend=""
+    mount_backend=$(overlay_mount_backend "$worktree_path" 2>/dev/null || true)
+
     # Disable systemd service (safe to do inline)
     overlay_stop_mount "$worktree_path"
 
-    # FUSE cleanup must run in parent shell AFTER cd moves cwd away from mount
+    local q_worktree
+    q_worktree=$(printf '%q' "$worktree_path")
+    local q_overlay_base
+    q_overlay_base=$(printf '%q' "$overlay_base")
+    local q_golden_dir
+    q_golden_dir=$(printf '%q' "$golden_dir")
+
+    local unmount_cmd
+    local overlay_rm_cmd
+
+    case "$mount_backend" in
+        sudo)
+            unmount_cmd="sudo -n umount -l ${q_worktree} 2>/dev/null || sudo -n umount ${q_worktree} 2>/dev/null || true"
+            overlay_rm_cmd="sudo -n rm -rf ${q_overlay_base} 2>/dev/null || rm -rf ${q_overlay_base} 2>/dev/null || true"
+            ;;
+        sudoless)
+            unmount_cmd="fusermount3 -uz ${q_worktree} 2>/dev/null || fusermount -uz ${q_worktree} 2>/dev/null || true"
+            overlay_rm_cmd="rm -rf ${q_overlay_base} 2>/dev/null || true"
+            ;;
+        *)
+            # Fallback for unknown/unmounted state
+            unmount_cmd="sudo -n umount -l ${q_worktree} 2>/dev/null || sudo -n umount ${q_worktree} 2>/dev/null || fusermount3 -uz ${q_worktree} 2>/dev/null || fusermount -uz ${q_worktree} 2>/dev/null || true"
+            overlay_rm_cmd="sudo -n rm -rf ${q_overlay_base} 2>/dev/null || rm -rf ${q_overlay_base} 2>/dev/null || true"
+            ;;
+    esac
+
+    # Mount cleanup must run in parent shell AFTER cd moves cwd away from mount
     signal_eval "\
-fusermount3 -uz $(printf '%q' "$worktree_path") 2>/dev/null || true
-rmdir $(printf '%q' "$worktree_path") 2>/dev/null || true
-rm -rf $(printf '%q' "$overlay_base")
-git -C $(printf '%q' "$golden_dir") worktree prune 2>/dev/null || true"
+${unmount_cmd}
+rmdir ${q_worktree} 2>/dev/null || true
+${overlay_rm_cmd}
+git -C ${q_golden_dir} worktree prune 2>/dev/null || true"
 }
 
 # ── Overlay node_modules helpers ──────────────────────────────────────
@@ -532,9 +679,11 @@ cmd_list() {
             wt_name=$(basename "$wt_path")
             local mode="normal"
             local upper_size="-"
+            local mount_type=""
 
             if is_overlay_mounted "$wt_path"; then
                 mode="overlay"
+                mount_type=$(overlay_mount_backend "$wt_path" 2>/dev/null || echo "unknown")
                 local overlay_base
                 overlay_base=$(overlay_dirs "$wt_path")
                 if [ -d "${overlay_base}/upper" ]; then
@@ -556,11 +705,11 @@ cmd_list() {
             fi
 
             if is_golden "$base_dir" && [[ "$wt_name" == "$base_name" ]]; then
-                printf "  %-40s %-20s %s\n" "$wt_name" "[golden]" "$branch_info"
+                printf "  %-40s %-28s %s\n" "$wt_name" "[golden]" "$branch_info"
             elif [ "$mode" = "overlay" ]; then
-                printf "  %-40s %-20s %s%s\n" "$wt_name" "[overlay: ${upper_size}]" "$branch_info" "$dirty"
+                printf "  %-40s %-28s %s%s\n" "$wt_name" "[overlay:${mount_type} ${upper_size}]" "$branch_info" "$dirty"
             else
-                printf "  %-40s %-20s %s%s\n" "$wt_name" "" "$branch_info" "$dirty"
+                printf "  %-40s %-28s %s%s\n" "$wt_name" "" "$branch_info" "$dirty"
             fi
         fi
     done
@@ -622,7 +771,7 @@ cmd_init_golden() {
         echo '.pnpm-store' >> "$exclude_file"
     fi
 
-    log "Golden ready! Worktrees created with 'gw new/fork' will now use overlayfs."
+    log "Golden ready! Worktrees created with 'gw new/fork' will now use overlayfs (sudo mode if available, otherwise sudoless)."
     echo "  Never work directly in this directory — use worktrees."
 }
 
