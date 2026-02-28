@@ -10,7 +10,7 @@ show_help() {
 Git worktree manager (sibling worktrees only)
 
 Usage:
-  gw new <name>           Create new worktree from main
+  gw new <name>           Create new worktree from origin/main
   gw fork <name>          Create new worktree from current HEAD
   gw delete [name]        Delete current worktree (or named one)
   gw list                 List all worktrees
@@ -551,7 +551,7 @@ cmd_create_from_base() {
 }
 
 cmd_new() {
-    cmd_create_from_base "main" "new" "$@"
+    cmd_create_from_base "origin/main" "new" "$@"
 }
 
 cmd_fork() {
