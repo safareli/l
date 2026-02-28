@@ -173,6 +173,42 @@ is_overlay_mounted() {
     overlay_mount_backend "$path" >/dev/null 2>&1
 }
 
+is_registered_worktree_path() {
+    local base_dir="$1"
+    local target_path="$2"
+
+    while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]] && [ "${line#worktree }" = "$target_path" ]; then
+            return 0
+        fi
+    done < <(git -C "$base_dir" worktree list --porcelain 2>/dev/null || true)
+
+    return 1
+}
+
+cleanup_stale_worktree_path_now() {
+    local base_dir="$1"
+    local worktree_path="$2"
+
+    local overlay_base
+    overlay_base=$(overlay_dirs "$worktree_path")
+    local service_name
+    service_name=$(overlay_service_name "$worktree_path")
+
+    systemctl --user disable --now "$service_name" --quiet 2>/dev/null || true
+    rm -f "${GW_SYSTEMD_DIR}/${service_name}.service" 2>/dev/null || true
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+    sudo -n umount -l "$worktree_path" 2>/dev/null || \
+        sudo -n umount "$worktree_path" 2>/dev/null || \
+        fusermount3 -uz "$worktree_path" 2>/dev/null || \
+        fusermount -uz "$worktree_path" 2>/dev/null || true
+
+    rmdir "$worktree_path" 2>/dev/null || rm -rf "$worktree_path" 2>/dev/null || true
+    sudo -n rm -rf "$overlay_base" 2>/dev/null || rm -rf "$overlay_base" 2>/dev/null || true
+    git -C "$base_dir" worktree prune 2>/dev/null || true
+}
+
 run_install_quiet() {
     local worktree_path="$1"
     local manager="$2"
@@ -409,6 +445,9 @@ overlay_destroy() {
     # Disable systemd service (safe to do inline)
     overlay_stop_mount "$worktree_path"
 
+    # Drop git worktree metadata immediately (prune is best-effort fallback)
+    git -C "$golden_dir" worktree remove "$worktree_path" --force 2>/dev/null || true
+
     local q_worktree
     q_worktree=$(printf '%q' "$worktree_path")
     local q_overlay_base
@@ -438,7 +477,7 @@ overlay_destroy() {
     # Mount cleanup must run in parent shell AFTER cd moves cwd away from mount
     signal_eval "\
 ${unmount_cmd}
-rmdir ${q_worktree} 2>/dev/null || true
+rmdir ${q_worktree} 2>/dev/null || rm -rf ${q_worktree} 2>/dev/null || true
 ${overlay_rm_cmd}
 git -C ${q_golden_dir} worktree prune 2>/dev/null || true"
 }
@@ -498,6 +537,19 @@ cmd_create_from_base() {
 
     local safe_branch_name="${branch_name//\//-}"
     local worktree_path="${parent_dir}/${base_name}--${safe_branch_name}"
+
+    if [ -d "$worktree_path" ]; then
+        local overlay_base
+        overlay_base=$(overlay_dirs "$worktree_path")
+        local service_name
+        service_name=$(overlay_service_name "$worktree_path")
+
+        if ! is_registered_worktree_path "$base_dir" "$worktree_path" && \
+            { is_overlay_mounted "$worktree_path" || [ -d "$overlay_base" ] || [ -f "${GW_SYSTEMD_DIR}/${service_name}.service" ]; }; then
+            log "Found stale worktree path, cleaning up: $worktree_path"
+            cleanup_stale_worktree_path_now "$base_dir" "$worktree_path"
+        fi
+    fi
 
     if [ -d "$worktree_path" ]; then
         echo "Error: Directory already exists: $worktree_path"
@@ -858,7 +910,7 @@ cmd_update_golden() {
 
     run_deps_install "$golden_dir"
 
-    # 5. Reset behind worktrees so they don't show phantom changes
+    # 5. Refresh all overlay worktrees so lowerdir updates don't show as phantom dirt
     while IFS= read -r line; do
         if [[ "$line" == "worktree "* ]]; then
             local wt_path="${line#worktree }"
@@ -868,9 +920,9 @@ cmd_update_golden() {
             local branch
             branch=$(cd "$wt_path" && git branch --show-current 2>/dev/null || echo "(detached)")
 
-            if ! (cd "$wt_path" && git merge-base --is-ancestor "$new_head" HEAD 2>/dev/null); then
-                log "Resetting: $(basename "$wt_path") ($branch)"
-                (cd "$wt_path" && git reset --hard --quiet)
+            log "Refreshing: $(basename "$wt_path") ($branch)"
+            if ! (cd "$wt_path" && git reset --hard --quiet); then
+                echo "    ⚠ Could not reset $(basename "$wt_path"); continuing."
             fi
         fi
     done < <(git worktree list --porcelain)
