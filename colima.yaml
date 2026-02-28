@@ -210,8 +210,11 @@ cpuType: ""
 # TODO But in next release DNS issue is fixed https://github.com/abiosoft/colima/issues/1426#issuecomment-3872043360
 provision:
   # TODO after update i should be able to have null mounts https://github.com/abiosoft/colima/issues/1510#issuecomment-3892680685
+  # Colima auto-adds a read-only caches mount (~/Library/Caches/colima) as mount0.
+  # Our ~/colima-l mount becomes mount1 but doesn't auto-mount since paths overlap under /Users/safareli.
+  # Mount it manually at ~/mac.
   - mode: system
-    script: umount /Users/safareli 2>/dev/null || true
+    script: mkdir -p /home/safareli.linux/mac && mount -t virtiofs mount1 /home/safareli.linux/mac 2>/dev/null || true
 
 # Modify ~/.ssh/config automatically to include a SSH config for the virtual machine.
 # SSH config will still be generated in $COLIMA_HOME/ssh_config regardless.
@@ -237,7 +240,9 @@ sshPort: 0
 #
 # Colima default behaviour: $HOME is mounted as writable.
 # Default: []
-mounts: []
+mounts:
+  - location: ~/colima-l
+    writable: true
 
 # Specify a custom disk image for the virtual machine.
 # When not specified, Colima downloads an appropriate disk image from Github at
@@ -250,7 +255,7 @@ diskImage: ""
 # Size of the disk in GiB for the root filesystem of the virtual machine.
 # This value is ignored if no runtime is in use. i.e. `none` runtime.
 # Default: 20
-rootDisk: 50
+rootDisk: 100
 
 # Environment variables for the virtual machine.
 #
