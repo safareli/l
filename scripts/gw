@@ -577,7 +577,7 @@ cmd_create_from_base() {
     if [ "$is_existing_remote" = true ] && [ "$is_existing_local" = false ]; then
         git branch "$branch_name" "origin/$branch_name"
     elif [ "$is_existing_local" = false ] && [ "$is_existing_remote" = false ]; then
-        git branch "$branch_name" "$base_ref"
+        git branch --no-track "$branch_name" "$base_ref"
     fi
 
     # ── Create worktree ──────────────────────────────────────────
