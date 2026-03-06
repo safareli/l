@@ -10,8 +10,8 @@ show_help() {
 Git worktree manager (sibling worktrees only)
 
 Usage:
-  gw new <name>           Create new worktree from origin/main
-  gw fork <name>          Create new worktree from current HEAD
+  gw new [-g|-s|-f] <name>    Create new worktree from origin/main
+  gw fork [-g|-s|-f] <name>   Create new worktree from current HEAD
   gw delete [name]        Delete current worktree (or named one)
   gw list                 List all worktrees
   gw init-golden          Set up current repo as overlay golden
@@ -31,6 +31,11 @@ new/fork use overlayfs with automatic backend selection:
   - kernel overlayfs via sudo (if passwordless sudo is available)
   - fuse-overlayfs (sudoless fallback)
 Mounts persist across reboots via systemd user services.
+
+FS backend flags (for new/fork):
+  -g    Force plain git worktree (no overlay, even if golden)
+  -s    Force kernel overlayfs via sudo
+  -f    Force fuse-overlayfs (sudoless)
 
 Environment:
   GW_USER            Username prefix for new branches (default: $USER)
@@ -498,17 +503,29 @@ cmd_create_from_base() {
     local mode_name="$2"
     shift 2
 
+    local fs_backend=""  # "" = auto (current behavior)
+    local OPTIND=1
+    while getopts "gsf" opt; do
+        case "$opt" in
+            g) fs_backend="git" ;;
+            s) fs_backend="sudo" ;;
+            f) fs_backend="fuse" ;;
+            *) echo "Usage: gw ${mode_name} [-g|-s|-f] <name>"; exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
     local name="${1:-}"
 
     if [ -z "$name" ]; then
         echo "Error: Branch name required"
-        echo "Usage: gw ${mode_name} <name>"
+        echo "Usage: gw ${mode_name} [-g|-s|-f] <name>"
         exit 1
     fi
 
     if [ "$#" -gt 1 ]; then
         echo "Error: gw ${mode_name} accepts only one argument"
-        echo "Usage: gw ${mode_name} <name>"
+        echo "Usage: gw ${mode_name} [-g|-s|-f] <name>"
         exit 1
     fi
 
@@ -564,10 +581,17 @@ cmd_create_from_base() {
     fi
 
     # ── Create worktree ──────────────────────────────────────────
-    if is_golden "$base_dir"; then
+    if is_golden "$base_dir" && [ "$fs_backend" != "git" ]; then
+        if [ "$fs_backend" = "sudo" ] || [ "$fs_backend" = "fuse" ]; then
+            GW_OVERLAY_MODE="$fs_backend"
+        fi
         log "Creating overlay worktree..."
         overlay_create "$base_dir" "$worktree_path" "$branch_name"
     else
+        if [ "$fs_backend" = "sudo" ] || [ "$fs_backend" = "fuse" ]; then
+            echo "Error: Overlay flags (-s, -f) require a golden repo. Run 'gw init-golden' first."
+            exit 1
+        fi
         log "Creating worktree..."
         git worktree add "$worktree_path" "$branch_name"
         run_deps_install "$worktree_path"
