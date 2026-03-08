@@ -626,8 +626,22 @@ cmd_create_from_base() {
     signal_cd "$worktree_path"
 }
 
+resolve_main_ref() {
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+        echo "origin/main"
+    elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+        echo "origin/master"
+    elif git rev-parse --verify main >/dev/null 2>&1; then
+        echo "main"
+    elif git rev-parse --verify master >/dev/null 2>&1; then
+        echo "master"
+    else
+        echo "HEAD"
+    fi
+}
+
 cmd_new() {
-    cmd_create_from_base "origin/main" "new" "$@"
+    cmd_create_from_base "$(resolve_main_ref)" "new" "$@"
 }
 
 cmd_fork() {
