@@ -58,6 +58,27 @@ let
   # Fast parallel hard-link directory copy tool
   cpal = pkgs.callPackage ./scripts/cpal { };
 
+  # Runtime shared libraries needed by npm-installed Playwright/Chromium
+  playwrightLibs = with pkgs; [
+    glib
+    nss
+    nspr
+    dbus
+    at-spi2-core     # provides libatk-1.0 + libatspi
+    expat
+    libx11
+    libxcomposite
+    libxdamage
+    libxext
+    libxfixes
+    libxrandr
+    libgbm
+    libxcb
+    libxkbcommon
+    systemd          # provides libudev
+    alsa-lib
+  ];
+
   # Shared env vars exported in both bash and zsh shell init
   # NOTE: These are ALSO added to home.sessionVariables (see below) so that
   # non-interactive shells (e.g. agents, VS Code tasks) can see them.
@@ -67,6 +88,10 @@ let
     WHISPER_MODEL_PATH = "${whisper-model-small-en}";
     PIPER_VOICES_DIR = "${piper-voices}";
     PIPER_BIN = "${piper-tts-lite}/bin/piper";
+    LD_LIBRARY_PATH = lib.makeLibraryPath playwrightLibs;
+    TS_CERT = "/etc/tailscale-certs/ts.crt";
+    TS_KEY = "/etc/tailscale-certs/ts.key";
+    TS_HOST = "colima-l.hoki-climb.ts.net";
 
     # Default editors (used by sudoedit, git, etc.)
     EDITOR = "${pkgs.nano}/bin/nano";
@@ -101,6 +126,8 @@ in
     # Core development
     nodejs_25          # Latest (project flakes override with nodejs_22 LTS)
     bun
+    zig
+    go
 
     # AI tools
     claude-code
@@ -122,6 +149,8 @@ in
     eza                # better ls
     htop
     btop
+    dua              # disk usage analyzer (interactive TUI)
+    ncdu             # disk usage analyzer (hardlink-aware with --shared-column unique)
     tree
     curl
     wget
@@ -142,6 +171,9 @@ in
     fuse-overlayfs     # Rootless overlayfs (used by fast-wt)
     cpal               # Fast parallel hard-link directory copy (local C tool)
 
+    # TLS / certificates
+    mkcert             # Locally-trusted dev certificates
+
     # Nix tools
     nil                # Nix LSP
     nixpkgs-fmt        # Nix formatter
@@ -157,7 +189,7 @@ in
 
     # Misc utilities
     time               # GNU time (more detailed than shell builtin)
-  ];
+  ] ++ playwrightLibs;
   
   # ============================================================================
   # Shell - Bash (so hm-session-vars are sourced in bash sessions too, e.g. pi)
@@ -305,13 +337,13 @@ in
         s = "status";
         c = "checkout";
         cp = "cherry-pick";
-        main = "checkout --detach main";
+        main = "checkout --detach origin/main";
         todo = "!f() { git diff main... --unified=0 | grep '^+.*TODO'; }; f";
         cm = "commit";
         cn = "commit -n";
         ca = "commit --amend";
         n = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1; }; f'';
-        nm = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1 main; }; f'';
+        nm = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1 origin/main; }; f'';
         skipped = "!f() { git ls-files -v | grep ^S; }; f";
         skip = "update-index --skip-worktree";
         unskip = "update-index --no-skip-worktree";
@@ -490,6 +522,23 @@ in
     executable = true;
   };
 
+  home.file.".local/bin/stt-http-server" = {
+    text = ''
+      #!/usr/bin/env bash
+      exec ${pkgs.bun}/bin/bun run "${config.xdg.configHome}/home-manager/skills/stt/stt-http.ts" "$@"
+    '';
+    executable = true;
+  };
+
+  home.file.".local/bin/stt-streaming" = {
+    text = ''
+      #!/usr/bin/env bash
+      cd "${config.xdg.configHome}/home-manager/skills/stt"
+      exec ${pkgs.uv}/bin/uv run --python python3.11 python -m stt_streaming "$@"
+    '';
+    executable = true;
+  };
+
   home.file.".local/bin/tts" = {
     text = ''
       #!/usr/bin/env bash
@@ -509,6 +558,7 @@ in
   # Portal - Local services index page
   # ============================================================================
   home.file.".local/share/portal/index.html".source = ./portal.html;
+  home.file.".local/share/stt-live/index.html".source = ./stt-live.html;
 
   # ============================================================================
   # Systemd user services
@@ -561,6 +611,72 @@ systemd.user.services.opencode-web = {
     };
   };
 
+  systemd.user.services.stt-http = {
+    Unit = {
+      Description = "STT HTTP transcription server";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Environment = [
+        "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+      ];
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-http";
+      ExecStart = "%h/.local/bin/stt-http-server --host 0.0.0.0 --port 6770";
+      StandardOutput = "append:%h/.local/share/stt-http/stt-http.log";
+      StandardError = "append:%h/.local/share/stt-http/stt-http.log";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # Pre-create log directories for systemd services that use append: log files.
+  # systemd opens log files BEFORE ExecStartPre, so the dirs must already exist.
+  home.activation.createServiceLogDirs = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    mkdir -p "$HOME/.local/share/stt-streaming"
+    mkdir -p "$HOME/.local/share/stt-http"
+  '';
+
+  systemd.user.services.stt-streaming = {
+    Unit = {
+      Description = "Streaming STT WebSocket server (NeMo FastConformer)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Environment = [
+        "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+      ];
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-streaming";
+      ExecStart = "%h/.local/bin/stt-streaming --host 0.0.0.0 --port 6771 --langs en";
+      StandardOutput = "append:%h/.local/share/stt-streaming/stt-streaming.log";
+      StandardError = "append:%h/.local/share/stt-streaming/stt-streaming.log";
+      Restart = "on-failure";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  systemd.user.services.stt-live = {
+    Unit = {
+      Description = "STT Live - browser UI for live transcription";
+      After = [ "network.target" ];
+    };
+    Service = {
+      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/stt-live --port 6772 --addr 0.0.0.0";
+      StandardOutput = "append:%h/.local/share/stt-live/stt-live.log";
+      StandardError = "append:%h/.local/share/stt-live/stt-live.log";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
   systemd.user.services.portal = {
     Unit = {
       Description = "Portal - Local services index";
@@ -589,6 +705,45 @@ systemd.user.services.opencode-web = {
       StandardError = "append:%h/.local/share/ttyd/ttyd.log";
       Restart = "on-failure";
       RestartSec = 5;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  systemd.user.services.tailscale-cert-renew = {
+    Unit.Description = "Renew Tailscale cert";
+    Service = {
+      Type = "oneshot";
+      ExecStart = toString (pkgs.writeShellScript "tailscale-cert-renew" ''
+        DOMAIN=$(${pkgs.tailscale}/bin/tailscale status --json | ${pkgs.jq}/bin/jq -r '.Self.DNSName | rtrimstr(".")')
+        ${pkgs.tailscale}/bin/tailscale cert --cert-file /etc/tailscale-certs/ts.crt --key-file /etc/tailscale-certs/ts.key "$DOMAIN"
+      '');
+    };
+  };
+
+  systemd.user.timers.tailscale-cert-renew = {
+    Unit.Description = "Monthly Tailscale cert renewal";
+    Timer = {
+      OnCalendar = "monthly";
+      Persistent = true;
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
+
+  systemd.user.services.ko-bot = {
+    Unit = {
+      Description = "ko - Telegram Pi agent bot";
+      After = [ "network.target" ];
+    };
+    Service = {
+      WorkingDirectory = "%h/dev/ko";
+      EnvironmentFile = "%h/dev/ko/.env";
+      ExecStart = "/nix/var/nix/profiles/default/bin/nix develop %h/dev/ko --no-update-lock-file --command bash -c 'export PATH=\"%h/.local/bin:$PATH\" && exec bun run start'";
+      StandardOutput = "append:%h/.local/share/ko-bot/ko-bot.log";
+      StandardError = "append:%h/.local/share/ko-bot/ko-bot.log";
+      Restart = "on-failure";
+      RestartSec = 10;
     };
     Install = {
       WantedBy = [ "default.target" ];

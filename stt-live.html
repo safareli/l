@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live STT</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        max-width: 700px;
+        margin: 0 auto;
+        padding: 40px 20px;
+        background: #fafafa;
+        color: #333;
+      }
+      h1 { font-weight: 300; font-size: 2.2em; margin-bottom: 0.3em; }
+      .subtitle { color: #888; margin-bottom: 1.5em; font-size: 0.95em; }
+
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 1.5em;
+      }
+      button {
+        padding: 0.7em 2em;
+        font-size: 1em;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 500;
+        transition: background 0.2s, transform 0.1s;
+      }
+      button:active { transform: scale(0.97); }
+      #btn-start {
+        background: #2563eb;
+        color: white;
+      }
+      #btn-start:hover { background: #1d4ed8; }
+      #btn-start.recording {
+        background: #dc2626;
+      }
+      #btn-start.recording:hover { background: #b91c1c; }
+      #btn-start:disabled {
+        background: #94a3b8;
+        cursor: not-allowed;
+      }
+      #btn-clear {
+        background: #e2e8f0;
+        color: #475569;
+      }
+      #btn-clear:hover { background: #cbd5e1; }
+
+      #status {
+        font-size: 0.85em;
+        color: #64748b;
+        flex: 1;
+        text-align: right;
+      }
+      #status.error { color: #dc2626; }
+      #status.ok { color: #16a34a; }
+
+      #transcript {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5em;
+        min-height: 200px;
+        max-height: 70vh;
+        overflow-y: auto;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        line-height: 1.7;
+        font-size: 1.05em;
+      }
+      #transcript:empty::before {
+        content: "Press Start and speak into your microphone…";
+        color: #94a3b8;
+        font-style: italic;
+      }
+      .final { color: #1e293b; }
+      .partial { color: #94a3b8; }
+
+      .info {
+        margin-top: 1.5em;
+        padding: 1em 1.2em;
+        background: #f1f5f9;
+        border-radius: 8px;
+        font-size: 0.82em;
+        color: #64748b;
+        line-height: 1.5;
+      }
+      .info code {
+        background: #e2e8f0;
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+        font-size: 0.95em;
+      }
+      a { color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>🎤 Live Speech-to-Text</h1>
+    <p class="subtitle">Real-time English transcription via streaming FastConformer</p>
+
+    <div class="controls">
+      <button id="btn-start">Start</button>
+      <button id="btn-clear">Clear</button>
+      <span id="status"></span>
+    </div>
+
+    <div id="transcript"></div>
+
+    <div class="info">
+      Audio is streamed as raw 16 kHz PCM over WebSocket to
+      <code>stt-streaming</code> on port <strong>6771</strong>.<br>
+      Microphone access requires a <strong>secure context</strong> (HTTPS or localhost).
+      <a href="/" id="portal-link">← Portal</a>
+    </div>
+
+    <script>
+      // ── AudioWorklet processor (inlined as Blob) ──────────────────────
+      const PROCESSOR_CODE = `
+        class PCMProcessor extends AudioWorkletProcessor {
+          process(inputs) {
+            const ch = inputs[0]?.[0];
+            if (ch && ch.length > 0) {
+              const buf = new Int16Array(ch.length);
+              for (let i = 0; i < ch.length; i++) {
+                buf[i] = Math.max(-32768, Math.min(32767, ch[i] * 32768));
+              }
+              this.port.postMessage(buf.buffer, [buf.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor('pcm-processor', PCMProcessor);
+      `;
+
+      // ── State ─────────────────────────────────────────────────────────
+      let audioCtx = null;
+      let workletNode = null;
+      let micStream = null;
+      let ws = null;
+      let running = false;
+      let stopping = false;  // waiting for final response after stop
+      let stopTimeout = null;
+
+      let finals = [];      // completed utterance strings
+      let currentPartial = ''; // in-progress text
+
+      const btnStart  = document.getElementById('btn-start');
+      const btnClear  = document.getElementById('btn-clear');
+      const statusEl  = document.getElementById('status');
+      const transcript = document.getElementById('transcript');
+
+      // Portal link: same host, port 1111
+      document.getElementById('portal-link').href =
+        `${location.protocol}//${location.hostname}:1111`;
+
+      // ── Render ────────────────────────────────────────────────────────
+      function render() {
+        let html = '';
+        for (const t of finals) {
+          html += `<span class="final">${esc(t)} </span>`;
+        }
+        if (currentPartial) {
+          html += `<span class="partial">${esc(currentPartial)}</span>`;
+        }
+        transcript.innerHTML = html;
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+
+      function esc(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+
+      function setStatus(msg, cls) {
+        statusEl.textContent = msg;
+        statusEl.className = cls || '';
+      }
+
+      // ── Start ─────────────────────────────────────────────────────────
+      async function start() {
+        try {
+          btnStart.disabled = true;
+          setStatus('Requesting microphone…');
+
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, sampleRate: 16000 }
+          });
+
+          // Force 16 kHz context so browser resamples for us
+          audioCtx = new AudioContext({ sampleRate: 16000 });
+
+          // Load worklet
+          const blob = new Blob([PROCESSOR_CODE], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          await audioCtx.audioWorklet.addModule(blobUrl);
+          URL.revokeObjectURL(blobUrl);
+
+          const source = audioCtx.createMediaStreamSource(micStream);
+          workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+
+          // Connect through silent gain so the graph stays active
+          const silence = audioCtx.createGain();
+          silence.gain.value = 0;
+          source.connect(workletNode);
+          workletNode.connect(silence);
+          silence.connect(audioCtx.destination);
+
+          // WebSocket — use wss:// when page is served over HTTPS
+          const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+          const wsUrl = `${wsProto}://${location.hostname}:6771/stream?lang=en`;
+          setStatus(`Connecting to WS…`);
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            running = true;
+            btnStart.disabled = false;
+            btnStart.textContent = 'Stop';
+            btnStart.classList.add('recording');
+            setStatus('🔴 Listening…', 'ok');
+          };
+
+          ws.onmessage = (ev) => {
+            const msg = JSON.parse(ev.data);
+            switch (msg.type) {
+              case 'ready':
+                setStatus('🔴 Listening (model ready)', 'ok');
+                break;
+              case 'partial':
+                currentPartial = msg.text || '';
+                render();
+                break;
+              case 'final':
+                if (msg.text) finals.push(msg.text);
+                currentPartial = '';
+                render();
+                // If we were waiting for this final after stop, now close cleanly
+                if (stopping) finishStop();
+                break;
+              case 'error':
+                setStatus(`Error: ${msg.message}`, 'error');
+                break;
+            }
+          };
+
+          ws.onerror = () => {
+            setStatus('WebSocket error', 'error');
+            if (stopping) finishStop();
+            else if (running) stop();
+          };
+
+          ws.onclose = () => {
+            if (stopping) finishStop();
+            else if (running) {
+              setStatus('WebSocket closed', 'error');
+              stop();
+            }
+          };
+
+          // Pipe PCM frames to WS
+          workletNode.port.onmessage = (ev) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(ev.data);
+            }
+          };
+
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, 'error');
+          btnStart.disabled = false;
+          cleanup();
+        }
+      }
+
+      // ── Stop ──────────────────────────────────────────────────────────
+      function stop() {
+        running = false;
+        btnStart.classList.remove('recording');
+        btnStart.disabled = true;
+
+        // Stop the mic immediately so no new audio is sent
+        cleanupAudio();
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          // Send end signal — server will process remaining buffer and reply with final
+          stopping = true;
+          ws.send(JSON.stringify({ type: 'end' }));
+          setStatus('⏳ Finalizing transcription…');
+
+          // Safety timeout: if server takes too long, close anyway
+          stopTimeout = setTimeout(() => {
+            console.warn('Stop timeout — closing WS without final');
+            finishStop();
+          }, 120_000); // 2 minutes max
+        } else {
+          cleanupWs();
+          resetUI('Stopped');
+        }
+      }
+
+      // Called when we receive the final message after stop, or on timeout
+      function finishStop() {
+        if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+        stopping = false;
+        cleanupWs();
+        resetUI('Stopped');
+      }
+
+      function cleanupAudio() {
+        if (workletNode) { workletNode.disconnect(); workletNode = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+        if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      }
+
+      function cleanupWs() {
+        if (ws) { ws.close(); ws = null; }
+      }
+
+      function resetUI(msg) {
+        btnStart.textContent = 'Start';
+        btnStart.disabled = false;
+        setStatus(msg);
+      }
+
+      // ── Event handlers ────────────────────────────────────────────────
+      btnStart.addEventListener('click', () => {
+        if (running) stop(); else start();
+      });
+
+      btnClear.addEventListener('click', () => {
+        finals = [];
+        currentPartial = '';
+        render();
+      });
+    </script>
+  </body>
+</html>

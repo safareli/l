@@ -12,10 +12,15 @@ dependencies = [
     "nemo_toolkit[asr]==2.1.0",
     "numpy<2",
     "torch",
+    "websockets>=13.0",
 ]
 
 [project.scripts]
 stt-nemo = "stt_nemo:main"
+stt-streaming = "stt_streaming:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stt_nemo", "src/stt_streaming"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
