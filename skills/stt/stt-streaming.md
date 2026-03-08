@@ -62,15 +62,44 @@ The English model supports multiple latency modes via attention context size con
 ```bash
 cd ~/.config/home-manager/skills/stt
 
-# English only (default)
+# English only (default, PyTorch)
 ./stt-streaming --port 6771
+
+# ONNX Runtime mode (~6.8x faster encoder, real-time on CPU)
+./stt-streaming --port 6771 --onnx
 
 # Both languages (~920MB memory)
 ./stt-streaming --langs en,ka --port 6771
 
+# Both languages with ONNX
+./stt-streaming --langs en,ka --port 6771 --onnx
+
 # Lower latency English (0ms look-ahead, slightly worse accuracy)
 ./stt-streaming --langs en --att-context-size 70,0
 ```
+
+### ONNX mode
+
+ONNX Runtime replaces PyTorch for encoder/decoder inference, providing ~6.8x speedup on the encoder forward pass (165ms → 24ms per chunk). This brings streaming from 1.34x real-time (too slow) to comfortably under 1.0x real-time.
+
+**First-time setup — export ONNX models:**
+
+```bash
+cd ~/.config/home-manager/skills/stt
+
+# Export English model (~435 MB encoder + ~20 MB decoder)
+uv run --python python3.11 python scripts/export_onnx.py --langs en
+
+# Export Georgian model
+uv run --python python3.11 python scripts/export_onnx.py --langs ka
+
+# Export both
+uv run --python python3.11 python scripts/export_onnx.py --langs en,ka
+```
+
+ONNX models are saved to `~/.cache/stt-streaming-onnx/<lang>/`. The export needs the PyTorch model (downloaded automatically) and takes a few minutes per language.
+
+**Note:** The NeMo PyTorch model is still loaded at startup for the mel preprocessor and `CacheAwareStreamingAudioBuffer`. Only the encoder/decoder inference runs through ONNX Runtime. This is the short-term approach — the preprocessor is not the bottleneck (the encoder is 95%+ of inference time).
 
 ### CLI options
 
@@ -80,6 +109,11 @@ cd ~/.config/home-manager/skills/stt
 --langs LANGS            Comma-separated: en, ka (default: en)
 --att-context-size L,R   EN model attention context (default: 70,1 = 80ms)
                          Options: 70,0 (0ms) / 70,1 (80ms) / 70,6 (480ms) / 70,13 (1040ms)
+--threads N              CPU threads for inference (default: 4)
+                         For batch_size=1 streaming, 2-4 is usually optimal.
+                         Using all CPU cores causes synchronization overhead.
+--onnx                   Use ONNX Runtime for encoder/decoder inference (~6.8x faster).
+                         Requires pre-exported models (see above).
 ```
 
 ### Test with a WAV file
@@ -143,11 +177,25 @@ ws.send(int16.buffer);
 
 ```
 src/stt_streaming/
-  __init__.py     # Model loading, Session class, WebSocket server
-  __main__.py     # Entry point
+  __init__.py       # Model loading, Session class, WebSocket server, CLI
+  __main__.py       # Entry point
+  onnx_session.py   # ONNX Runtime-based Session (OnnxSession) + greedy RNN-T decoding
 
-stt-streaming     # Shell wrapper: cd to project dir, exec uv run python -m stt_streaming
-test_streaming.py # Test client: streams a WAV file to the server
+scripts/
+  export_onnx.py    # One-time script to export PyTorch models to ONNX format
+
+stt-streaming       # Shell wrapper: cd to project dir, exec uv run python -m stt_streaming
+test_streaming.py   # Test client: streams a WAV file to the server
+
+~/.cache/stt-streaming-onnx/
+  en/
+    encoder-model.onnx         # 435 MB — FastConformer encoder with streaming cache I/O
+    decoder_joint-model.onnx   # 20 MB — RNN-T decoder + joint network
+    metadata.json              # vocab, blank_id, cache shapes, streaming config
+  ka/
+    encoder-model.onnx         # 435 MB
+    decoder_joint-model.onnx   # 20 MB
+    metadata.json
 ```
 
 ### Key components
@@ -165,7 +213,13 @@ test_streaming.py # Test client: streams a WAV file to the server
 
 **`Session.finalize()`** — Pads remaining audio with 560ms of silence (ensures last partial chunk fills a complete model chunk), processes with `keep_all_outputs=True`, returns final text.
 
-**`serve()`** — asyncio + `websockets` server. Model inference runs in `asyncio.to_thread()` to avoid blocking the event loop. Each connection gets an independent `Session` with its own caches.
+**`OnnxSession`** — Drop-in replacement for `Session` when `--onnx` is used. Same `feed_audio()` / `finalize()` API. Uses NeMo's preprocessor and `CacheAwareStreamingAudioBuffer` for mel extraction (same as `Session`), but replaces `conformer_stream_step` with:
+1. ONNX Runtime encoder inference (the 6.8x speedup)
+2. Custom `greedy_rnnt_decode()` loop using ONNX decoder+joint model
+
+**`greedy_rnnt_decode()`** — Greedy RNN-T decoding loop. For each encoder time step, runs the decoder+joint ONNX model to predict tokens until blank is emitted, then moves to the next time step. The decoder+joint model is only 20MB so each call is <1ms.
+
+**`serve()`** — asyncio + `websockets` server. Each connection spawns two concurrent tasks: a **receiver** that consumes WebSocket messages into an asyncio Queue, and a **processor** that drains accumulated audio from the queue and runs inference via `asyncio.to_thread()`. This producer/consumer pattern decouples message ingestion from model inference — when inference can't keep up with real-time audio rate, multiple audio frames get batched into a single `feed_audio()` call, reducing per-call overhead (thread dispatch, numpy conversion, mel preprocessing). Each connection gets an independent `Session` (or `OnnxSession`) with its own caches.
 
 ### Processing pipeline (per chunk)
 

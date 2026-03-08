@@ -20,6 +20,7 @@ Protocol:
 Usage:
     uv run python -m stt_streaming --langs en --port 6771
     uv run python -m stt_streaming --langs en,ka --port 6771
+    uv run python -m stt_streaming --langs en --onnx --port 6771
 """
 
 import argparse
@@ -43,6 +44,10 @@ SAMPLE_RATE = 16000
 MIN_PREPROCESS_MS = 200
 MIN_PREPROCESS_SAMPLES = SAMPLE_RATE * MIN_PREPROCESS_MS // 1000  # 3200 samples
 
+# Minimum bytes before we bother dispatching to the inference thread.
+# 2 bytes per int16 sample.
+MIN_PREPROCESS_BYTES = MIN_PREPROCESS_SAMPLES * 2
+
 # Silence padding appended when finalizing a stream.
 # Ensures the last partial chunk has enough data for the model.
 FLUSH_PAD_MS = 560
@@ -58,6 +63,16 @@ STREAMING_MODELS = {
 # Options: [70,0]=0ms  [70,1]=80ms  [70,6]=480ms  [70,13]=1040ms
 DEFAULT_ATT_CONTEXT_SIZE_EN = [70, 1]
 
+# Default number of PyTorch CPU threads for inference.
+# For batch_size=1 streaming, fewer threads is better than the default
+# (all cores) because thread synchronization overhead dominates.
+# 4 threads is a good balance for most CPUs.
+DEFAULT_NUM_THREADS = 4
+
+# Sentinel objects for the audio queue (producer/consumer pattern).
+_SENTINEL_END = object()
+_SENTINEL_RESET = object()
+
 
 def _suppress_logging():
     """Suppress NeMo's extremely verbose startup logging."""
@@ -66,14 +81,27 @@ def _suppress_logging():
     warnings.filterwarnings("ignore")
 
 
+def _log(msg: str):
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", file=sys.stderr)
+
+
 def load_models(
     langs: list[str],
     att_context_size_en: Optional[list[int]] = None,
+    num_threads: int = DEFAULT_NUM_THREADS,
 ) -> dict:
     """
     Load streaming ASR models for the specified languages.
     Returns {lang: model} dict.
     """
+    # Set PyTorch thread counts BEFORE loading models.
+    # For batch_size=1 streaming inference, using all CPU cores causes
+    # excessive thread synchronization overhead. 2-4 threads is optimal.
+    torch.set_num_threads(num_threads)
+    torch.set_num_interop_threads(1)
+    _log(f"PyTorch threads: intra-op={num_threads}, inter-op=1")
+
     _suppress_logging()
     import nemo.collections.asr as nemo_asr
 
@@ -139,8 +167,10 @@ class Session:
         self.model = model
         self.lang = lang
 
-        # Raw PCM accumulator (float32, pre-preprocessing).
-        self.pcm_buffer = np.array([], dtype=np.float32)
+        # Raw PCM accumulator: bytearray of int16 LE bytes.
+        # Using bytearray instead of numpy array avoids O(n²) np.concatenate
+        # on every feed_audio call — bytearray.extend() is amortized O(1).
+        self.pcm_buffer = bytearray()
 
         # NeMo's streaming buffer handles feature extraction and chunking.
         self.streaming_buffer = CacheAwareStreamingAudioBuffer(model=model)
@@ -170,15 +200,14 @@ class Session:
         Returns a list of partial transcription strings
         (one per model chunk processed, may be empty).
         """
-        samples = np.frombuffer(pcm_int16_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        self.pcm_buffer = np.concatenate([self.pcm_buffer, samples])
+        self.pcm_buffer.extend(pcm_int16_bytes)
 
-        if len(self.pcm_buffer) < MIN_PREPROCESS_SAMPLES:
+        if len(self.pcm_buffer) < MIN_PREPROCESS_BYTES:
             return []
 
-        # Preprocess accumulated audio and push into the streaming buffer.
-        audio = self.pcm_buffer
-        self.pcm_buffer = np.array([], dtype=np.float32)
+        # Convert accumulated bytes to float32 audio, then clear buffer.
+        audio = np.frombuffer(bytes(self.pcm_buffer), dtype=np.int16).astype(np.float32) * (1.0 / 32768.0)
+        self.pcm_buffer.clear()
         self._append_audio(audio)
 
         return self._process_chunks(is_final=False)
@@ -188,8 +217,11 @@ class Session:
         Flush remaining audio with silence padding and return the final
         transcription for this utterance.
         """
-        remaining = self.pcm_buffer if len(self.pcm_buffer) > 0 else np.array([], dtype=np.float32)
-        self.pcm_buffer = np.array([], dtype=np.float32)
+        if self.pcm_buffer:
+            remaining = np.frombuffer(bytes(self.pcm_buffer), dtype=np.int16).astype(np.float32) * (1.0 / 32768.0)
+            self.pcm_buffer.clear()
+        else:
+            remaining = np.array([], dtype=np.float32)
 
         # Pad with silence so the last partial chunk fills a full model chunk.
         pad = np.zeros(FLUSH_PAD_SAMPLES, dtype=np.float32)
@@ -213,20 +245,23 @@ class Session:
         """
         Iterate over all available model chunks in the streaming buffer
         and run conformer_stream_step on each.
+
+        Uses a single torch.inference_mode() context for all chunks
+        (avoids per-chunk context manager overhead).
         """
         results = []
 
-        for chunk_audio, chunk_lengths in self.streaming_buffer:
-            is_last_chunk = self.streaming_buffer.is_buffer_empty()
+        with torch.inference_mode():
+            for chunk_audio, chunk_lengths in self.streaming_buffer:
+                is_last_chunk = self.streaming_buffer.is_buffer_empty()
 
-            # On step 0 there's no pre-encode cache to drop.
-            drop = (
-                0
-                if self.step_num == 0
-                else self.model.encoder.streaming_cfg.drop_extra_pre_encoded
-            )
+                # On step 0 there's no pre-encode cache to drop.
+                drop = (
+                    0
+                    if self.step_num == 0
+                    else self.model.encoder.streaming_cfg.drop_extra_pre_encoded
+                )
 
-            with torch.inference_mode():
                 (
                     self.pred_out,
                     transcribed_texts,
@@ -248,8 +283,8 @@ class Session:
                 )
                 self.step_num += 1
 
-            text = _extract_text(transcribed_texts)
-            results.append(text)
+                text = _extract_text(transcribed_texts)
+                results.append(text)
 
         return results
 
@@ -286,8 +321,27 @@ def _parse_lang_from_path(path: str) -> str:
 # WebSocket server
 # ---------------------------------------------------------------------------
 
-async def _handle_connection(websocket, models: dict):
-    """Handle one WebSocket streaming session."""
+def _create_session(models: dict, lang: str, use_onnx: bool):
+    """Create a Session or OnnxSession depending on mode."""
+    if use_onnx:
+        from stt_streaming.onnx_session import OnnxSession
+        return OnnxSession(models[lang], lang)
+    else:
+        return Session(models[lang], lang)
+
+
+async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
+    """
+    Handle one WebSocket streaming session.
+
+    Uses a producer/consumer pattern: the receiver task consumes WebSocket
+    messages as fast as they arrive and queues them; the processor task
+    drains accumulated audio from the queue and runs inference. This
+    decouples message ingestion from model inference, so when inference is
+    slower than real-time audio rate, multiple audio frames get batched
+    into a single feed_audio() call — reducing per-call overhead (thread
+    dispatch, numpy conversion, mel preprocessing).
+    """
     path = websocket.request.path
     lang = _parse_lang_from_path(path)
 
@@ -299,9 +353,10 @@ async def _handle_connection(websocket, models: dict):
         await websocket.close()
         return
 
-    session = Session(models[lang], lang)
+    session = _create_session(models, lang, use_onnx)
     ts_start = time.monotonic()
-    _log(f"session open  lang={lang}")
+    mode_str = "onnx" if use_onnx else "pytorch"
+    _log(f"session open  lang={lang}  mode={mode_str}")
 
     await websocket.send(json.dumps({
         "type": "ready",
@@ -311,47 +366,102 @@ async def _handle_connection(websocket, models: dict):
         "channels": 1,
     }))
 
-    try:
-        async for message in websocket:
-            if isinstance(message, bytes):
-                if len(message) == 0:
-                    continue
-                results = await asyncio.to_thread(session.feed_audio, message)
-                for text in results:
-                    await websocket.send(json.dumps({"type": "partial", "text": text}))
+    queue: asyncio.Queue = asyncio.Queue()
 
-            elif isinstance(message, str):
+    async def receiver():
+        """Consume WebSocket messages and route to queue."""
+        try:
+            async for message in websocket:
+                if isinstance(message, bytes):
+                    if message:
+                        await queue.put(message)
+                elif isinstance(message, str):
+                    try:
+                        data = json.loads(message)
+                    except json.JSONDecodeError:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "message": "Invalid JSON",
+                        }))
+                        continue
+
+                    msg_type = data.get("type")
+                    if msg_type == "end":
+                        await queue.put(_SENTINEL_END)
+                    elif msg_type == "reset":
+                        await queue.put(_SENTINEL_RESET)
+                    else:
+                        await websocket.send(json.dumps({
+                            "type": "error",
+                            "message": f"Unknown message type: {msg_type}",
+                        }))
+        except Exception as e:
+            name = type(e).__name__
+            if "ConnectionClosed" not in name:
+                _log(f"receiver error lang={lang}: {name}: {e}")
+        finally:
+            # Signal processor to stop (connection closed or error).
+            await queue.put(None)
+
+    async def processor():
+        """Drain audio from queue, run inference, send results."""
+        nonlocal session
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                # Connection closed.
+                break
+
+            if item is _SENTINEL_END:
+                final_text = await asyncio.to_thread(session.finalize)
                 try:
-                    data = json.loads(message)
-                except json.JSONDecodeError:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "message": "Invalid JSON",
-                    }))
-                    continue
-
-                msg_type = data.get("type")
-
-                if msg_type == "end":
-                    final_text = await asyncio.to_thread(session.finalize)
                     await websocket.send(json.dumps({
                         "type": "final",
                         "text": final_text,
                     }))
+                except Exception:
+                    pass
+                continue
 
-                elif msg_type == "reset":
-                    session = Session(models[lang], lang)
+            if item is _SENTINEL_RESET:
+                session = _create_session(models, lang, use_onnx)
+                try:
                     await websocket.send(json.dumps({
                         "type": "ready",
                         "lang": lang,
                     }))
+                except Exception:
+                    pass
+                continue
 
+            # item is audio bytes. Drain any additional audio frames that
+            # arrived while the previous inference was running, batching
+            # them into a single feed_audio() call.
+            all_audio = bytearray(item)
+            while not queue.empty():
+                try:
+                    peek = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if isinstance(peek, bytes):
+                    all_audio.extend(peek)
                 else:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "message": f"Unknown message type: {msg_type}",
-                    }))
+                    # Non-audio sentinel — put it back and stop draining.
+                    await queue.put(peek)
+                    break
 
+            results = await asyncio.to_thread(session.feed_audio, bytes(all_audio))
+            for text in results:
+                try:
+                    await websocket.send(json.dumps({"type": "partial", "text": text}))
+                except Exception:
+                    return
+
+    try:
+        recv_task = asyncio.create_task(receiver())
+        proc_task = asyncio.create_task(processor())
+        await asyncio.gather(recv_task, proc_task)
     except Exception as e:
         name = type(e).__name__
         if "ConnectionClosed" not in name:
@@ -361,24 +471,20 @@ async def _handle_connection(websocket, models: dict):
         _log(f"session close lang={lang}  chunks={session.step_num}  elapsed={elapsed:.1f}s")
 
 
-def _log(msg: str):
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", file=sys.stderr)
-
-
-async def serve(host: str, port: int, models: dict):
+async def serve(host: str, port: int, models: dict, use_onnx: bool = False):
     """Start the WebSocket server (runs forever)."""
     import websockets
 
     async with websockets.serve(
-        lambda ws: _handle_connection(ws, models),
+        lambda ws: _handle_connection(ws, models, use_onnx=use_onnx),
         host,
         port,
         max_size=10 * 1024 * 1024,  # 10 MB max message size
         ping_interval=30,            # send ping every 30s
         ping_timeout=120,            # allow 120s without pong (model inference can block)
     ):
-        _log(f"stt-streaming listening on ws://{host}:{port}")
+        mode_str = "ONNX Runtime" if use_onnx else "PyTorch"
+        _log(f"stt-streaming listening on ws://{host}:{port}  ({mode_str})")
         _log(f"  Languages: {list(models.keys())}")
         _log(f"  Connect:   ws://{host}:{port}/stream?lang=<lang>")
         await asyncio.Future()  # run forever
@@ -408,14 +514,46 @@ def main():
             "Default: 70,1 (80ms). Options: 70,0 (0ms) / 70,1 (80ms) / 70,6 (480ms) / 70,13 (1040ms)"
         ),
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=DEFAULT_NUM_THREADS,
+        help=(
+            f"Number of PyTorch CPU threads for inference (default: {DEFAULT_NUM_THREADS}). "
+            "For batch_size=1 streaming, 2-4 is usually optimal. "
+            "Using all CPU cores causes excessive synchronization overhead."
+        ),
+    )
+    parser.add_argument(
+        "--onnx",
+        action="store_true",
+        help=(
+            "Use ONNX Runtime for encoder/decoder inference (~6.8x faster). "
+            "Requires pre-exported ONNX models in ~/.cache/stt-streaming-onnx/<lang>/. "
+            "Run: uv run --python python3.11 python scripts/export_onnx.py --langs <lang>"
+        ),
+    )
     args = parser.parse_args()
 
     langs = [lang.strip() for lang in args.langs.split(",") if lang.strip()]
     att_ctx = [int(x) for x in args.att_context_size.split(",")]
 
-    models = load_models(langs, att_context_size_en=att_ctx)
-    if not models:
-        print("No models loaded. Exiting.", file=sys.stderr)
-        sys.exit(1)
+    if args.onnx:
+        from stt_streaming.onnx_session import load_onnx_sessions
 
-    asyncio.run(serve(args.host, args.port, models))
+        models = load_onnx_sessions(langs, num_threads=args.threads, att_context_size_en=att_ctx)
+        if not models:
+            print("No ONNX models loaded. Exiting.", file=sys.stderr)
+            print(
+                "Export them first: uv run --python python3.11 python scripts/export_onnx.py --langs "
+                + ",".join(langs),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        models = load_models(langs, att_context_size_en=att_ctx, num_threads=args.threads)
+        if not models:
+            print("No models loaded. Exiting.", file=sys.stderr)
+            sys.exit(1)
+
+    asyncio.run(serve(args.host, args.port, models, use_onnx=args.onnx))

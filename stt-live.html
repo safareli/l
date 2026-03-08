@@ -51,6 +51,17 @@
         color: #475569;
       }
       #btn-clear:hover { background: #cbd5e1; }
+      #lang-select {
+        padding: 0.7em 1em;
+        font-size: 1em;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        background: white;
+        color: #334155;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      #lang-select:focus { outline: none; border-color: #2563eb; }
 
       #status {
         font-size: 0.85em;
@@ -100,9 +111,13 @@
   </head>
   <body>
     <h1>🎤 Live Speech-to-Text</h1>
-    <p class="subtitle">Real-time English transcription via streaming FastConformer</p>
+    <p class="subtitle">Real-time transcription via streaming FastConformer (ONNX)</p>
 
     <div class="controls">
+      <select id="lang-select">
+        <option value="en" selected>English</option>
+        <option value="ka">ქართული</option>
+      </select>
       <button id="btn-start">Start</button>
       <button id="btn-clear">Clear</button>
       <span id="status"></span>
@@ -152,6 +167,7 @@
       const btnClear  = document.getElementById('btn-clear');
       const statusEl  = document.getElementById('status');
       const transcript = document.getElementById('transcript');
+      const langSelect = document.getElementById('lang-select');
 
       // Portal link: same host, port 1111
       document.getElementById('portal-link').href =
@@ -209,8 +225,10 @@
           silence.connect(audioCtx.destination);
 
           // WebSocket — use wss:// when page is served over HTTPS
+          const lang = langSelect.value;
           const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-          const wsUrl = `${wsProto}://${location.hostname}:6771/stream?lang=en`;
+          const wsUrl = `${wsProto}://${location.hostname}:6771/stream?lang=${lang}`;
+          langSelect.disabled = true;  // can't switch while recording
           setStatus(`Connecting to WS…`);
           ws = new WebSocket(wsUrl);
 
@@ -320,6 +338,7 @@
       function resetUI(msg) {
         btnStart.textContent = 'Start';
         btnStart.disabled = false;
+        langSelect.disabled = false;
         setStatus(msg);
       }
 
