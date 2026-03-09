@@ -34,6 +34,8 @@ import sys
 import time
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
+
 SAMPLE_RATE = 16000
 
 # Default number of CPU threads for inference.
@@ -71,6 +73,57 @@ def _create_session(models: dict, lang: str, use_onnx: bool):
 
 
 # ---------------------------------------------------------------------------
+# Two-pass refinement
+# ---------------------------------------------------------------------------
+
+PARAKEET_URL = "http://127.0.0.1:6774/transcribe"
+
+
+async def _do_refinement(websocket, req, session):
+    """POST audio to Parakeet, send refined message back on WebSocket."""
+    try:
+        async with aiohttp.ClientSession() as http:
+            resp = await http.post(
+                PARAKEET_URL,
+                data=req.wav_bytes,
+                headers={"Content-Type": "audio/wav"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            if resp.status != 200:
+                err = await resp.text()
+                _log(f"Refinement failed: HTTP {resp.status}: {err[:200]}")
+                return
+            data = await resp.json()
+
+        text = data.get("text", "").strip()
+        if not text:
+            _log("Refinement returned empty text, skipping")
+            return
+
+        msg = {
+            "type": "refined",
+            "seq_start": req.seq_start,
+            "seq_end": req.seq_end,
+            "text": text,
+            "model": data.get("model", "parakeet"),
+            "elapsed_s": data.get("elapsed_s", 0),
+        }
+        try:
+            await websocket.send(json.dumps(msg))
+            _log(f"Refinement sent: seq {req.seq_start}-{req.seq_end} "
+                 f"({data.get('elapsed_s', '?')}s, {data.get('duration_s', '?')}s audio)")
+        except Exception:
+            pass  # WebSocket already closed
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        _log(f"Refinement failed: {type(e).__name__}: {e}")
+    finally:
+        if session is not None and hasattr(session, 'refinement_done'):
+            session.refinement_done()
+
+
+# ---------------------------------------------------------------------------
 # WebSocket server
 # ---------------------------------------------------------------------------
 
@@ -88,6 +141,9 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
         continuous=true  — enable continuous mode with auto-segmentation
         silence_ms=800   — silence duration to trigger segment boundary (default: 800)
         max_segment_ms=60000 — force boundary after this duration (default: 60000, 0=off)
+        refine=true      — enable two-pass refinement via Parakeet
+        refinement_silence_ms=2000 — silence to trigger refinement (default: 2000)
+        refinement_max_ms=30000    — max audio before forced refinement (default: 30000)
     """
     path = websocket.request.path
     params = _parse_query_params(path)
@@ -95,6 +151,9 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
     continuous = params.get("continuous", "").lower() in ("true", "1", "yes")
     silence_ms = int(params.get("silence_ms", "400"))
     max_segment_ms = int(params.get("max_segment_ms", "60000"))
+    refine = params.get("refine", "").lower() in ("true", "1", "yes")
+    refinement_silence_ms = int(params.get("refinement_silence_ms", "2000"))
+    refinement_max_ms = int(params.get("refinement_max_ms", "30000"))
 
     if lang not in models:
         await websocket.send(json.dumps({
@@ -104,6 +163,14 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
         await websocket.close()
         return
 
+    # Refinement only works in continuous mode (and only for English)
+    if refine and not continuous:
+        refine = False
+        _log("refine=true requires continuous=true, ignoring")
+    if refine and lang != "en":
+        refine = False
+        _log(f"refine=true only supports lang=en (got {lang}), ignoring")
+
     if continuous:
         from stt_streaming.continuous import ContinuousSession
         create_fn = lambda: _create_session(models, lang, use_onnx)
@@ -111,6 +178,9 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
             create_session_fn=create_fn,
             silence_boundary_ms=silence_ms,
             max_segment_ms=max_segment_ms,
+            refine=refine,
+            refinement_silence_ms=refinement_silence_ms,
+            refinement_max_ms=refinement_max_ms,
         )
     else:
         session = _create_session(models, lang, use_onnx)
@@ -118,12 +188,14 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
     ts_start = time.monotonic()
     mode_str = "onnx" if use_onnx else "pytorch"
     cont_str = " continuous" if continuous else ""
-    _log(f"session open  lang={lang}  mode={mode_str}{cont_str}")
+    refine_str = " refine" if refine else ""
+    _log(f"session open  lang={lang}  mode={mode_str}{cont_str}{refine_str}")
 
     await websocket.send(json.dumps({
         "type": "ready",
         "lang": lang,
         "continuous": continuous,
+        "refine": refine,
         "sample_rate": SAMPLE_RATE,
         "encoding": "pcm_s16le",
         "channels": 1,
@@ -165,6 +237,9 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
         finally:
             await queue.put(None)
 
+    # Track refinement tasks so we can cancel them on disconnect
+    refinement_tasks: set[asyncio.Task] = set()
+
     async def processor():
         """Drain audio from queue, run inference, send results."""
         nonlocal session
@@ -183,6 +258,17 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
                     await websocket.send(json.dumps(msg))
                 except Exception:
                     pass
+
+                # Emit final refinement request for remaining buffered audio
+                if refine and hasattr(session, 'finalize_refinement'):
+                    final_ref_req = session.finalize_refinement()
+                    if final_ref_req is not None:
+                        task = asyncio.create_task(
+                            _do_refinement(websocket, final_ref_req, session)
+                        )
+                        refinement_tasks.add(task)
+                        task.add_done_callback(refinement_tasks.discard)
+
                 continue
 
             if item is _SENTINEL_RESET:
@@ -211,14 +297,21 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
 
             results = await asyncio.to_thread(session.feed_audio, bytes(all_audio))
             if continuous:
-                from stt_streaming.continuous import Partial, Final
+                from stt_streaming.continuous import Partial, Final, RefinementRequest
                 for result in results:
                     try:
-                        if isinstance(result, Final):
+                        if isinstance(result, RefinementRequest):
+                            # Fire-and-forget async refinement
+                            task = asyncio.create_task(
+                                _do_refinement(websocket, result, session)
+                            )
+                            refinement_tasks.add(task)
+                            task.add_done_callback(refinement_tasks.discard)
+                        elif isinstance(result, Final):
                             await websocket.send(json.dumps({
                                 "type": "final", "text": result.text, "seq": result.seq,
                             }))
-                        else:
+                        elif isinstance(result, Partial):
                             await websocket.send(json.dumps({
                                 "type": "partial", "text": result.text, "seq": result.seq,
                             }))
@@ -240,6 +333,11 @@ async def _handle_connection(websocket, models: dict, use_onnx: bool = False):
         if "ConnectionClosed" not in name:
             _log(f"session error lang={lang}: {name}: {e}")
     finally:
+        # Cancel any pending refinement tasks
+        for task in refinement_tasks:
+            task.cancel()
+        if refinement_tasks:
+            await asyncio.gather(*refinement_tasks, return_exceptions=True)
         elapsed = time.monotonic() - ts_start
         _log(f"session close lang={lang}  chunks={session.step_num}  elapsed={elapsed:.1f}s")
 

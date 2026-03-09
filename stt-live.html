@@ -172,6 +172,21 @@
       }
       .final { color: #1e293b; }
       .partial { color: #94a3b8; }
+      .segment.refined {
+        border-left: 3px solid #16a34a;
+        padding-left: 0.5em;
+        animation: refined-fade 0.6s ease-out;
+      }
+      .segment .refined-meta {
+        display: block;
+        font-size: 0.72em;
+        color: #94a3b8;
+        margin-top: 0.1em;
+      }
+      @keyframes refined-fade {
+        from { background: #f0fdf4; }
+        to   { background: transparent; }
+      }
 
       .info {
         margin-top: 1.5em;
@@ -207,6 +222,10 @@
       <label class="toggle-label">
         <input type="checkbox" id="chk-raw-mic">
         Raw mic
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="chk-refine">
+        Refine (Parakeet)
       </label>
       <label class="toggle-label">
         <input type="checkbox" id="chk-offline">
@@ -294,6 +313,7 @@
       const langSelect  = document.getElementById('lang-select');
       const chkContinuous = document.getElementById('chk-continuous');
       const chkRawMic    = document.getElementById('chk-raw-mic');
+      const chkRefine    = document.getElementById('chk-refine');
       const chkOffline   = document.getElementById('chk-offline');
 
       const stt2ResultEl   = document.getElementById('stt2-result');
@@ -310,6 +330,17 @@
       // Show/hide pause slider when continuous is toggled
       chkContinuous.addEventListener('change', () => {
         pauseControl.classList.toggle('visible', chkContinuous.checked);
+        // Refine requires continuous mode
+        if (!chkContinuous.checked && chkRefine.checked) {
+          chkRefine.checked = false;
+        }
+      });
+      // Refine auto-enables continuous
+      chkRefine.addEventListener('change', () => {
+        if (chkRefine.checked && !chkContinuous.checked) {
+          chkContinuous.checked = true;
+          pauseControl.classList.add('visible');
+        }
       });
       pauseSlider.addEventListener('input', () => {
         pauseValEl.textContent = (pauseSlider.value / 1000).toFixed(1) + 's';
@@ -363,16 +394,49 @@
         render();
       }
 
+      function handleRefined(msg) {
+        const start = msg.seq_start;
+        const end = msg.seq_end;
+
+        // Remove old segments in range [seq_start, seq_end]
+        segments = segments.filter(s => s.seq < start || s.seq > end);
+
+        // Insert single refined segment using seq_start so it sorts correctly
+        const refined = {
+          seq: start,
+          text: msg.text,
+          final: true,
+          refined: true,
+          refinedModel: msg.model || 'parakeet',
+          refinedElapsed: msg.elapsed_s || 0,
+        };
+
+        // Insert in correct position
+        const insertIdx = segments.findIndex(s => s.seq > start);
+        if (insertIdx === -1) {
+          segments.push(refined);
+        } else {
+          segments.splice(insertIdx, 0, refined);
+        }
+
+        render();
+      }
+
       // ── Render ────────────────────────────────────────────────────────
       function render() {
         let html = '';
         for (const seg of segments) {
           const cls = seg.final ? 'final' : 'partial';
+          const segCls = seg.refined ? 'segment refined' : 'segment';
           const badge = continuous
             ? `<span class="seq-badge">${seg.seq + 1}</span>`
             : '';
           if (seg.text) {
-            html += `<div class="segment"><span class="${cls}">${badge}${esc(seg.text)}</span></div>`;
+            let meta = '';
+            if (seg.refined) {
+              meta = `<span class="refined-meta">🦜 refined in ${seg.refinedElapsed.toFixed(2)}s</span>`;
+            }
+            html += `<div class="${segCls}"><span class="${cls}">${badge}${esc(seg.text)}</span>${meta}</div>`;
           }
         }
         transcriptEl.innerHTML = html;
@@ -438,13 +502,18 @@
 
           // WebSocket — use wss:// when page is served over HTTPS
           const lang = langSelect.value;
+          const refineEnabled = chkRefine.checked;
           const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
           let wsUrl = `${wsProto}://${location.hostname}:6771/stream?lang=${lang}`;
           if (continuous) {
             wsUrl += `&continuous=true&silence_ms=${pauseSlider.value}`;
           }
+          if (refineEnabled && continuous) {
+            wsUrl += `&refine=true`;
+          }
           langSelect.disabled = true;
           chkContinuous.disabled = true;
+          chkRefine.disabled = true;
           chkOffline.disabled = true;
           pauseSlider.disabled = true;
           setStatus('Connecting to WS…');
@@ -474,6 +543,9 @@
               case 'final':
                 handleFinal(msg);
                 if (stopping) finishStop();
+                break;
+              case 'refined':
+                handleRefined(msg);
                 break;
               case 'error':
                 setStatus(`Error: ${msg.message}`, 'error');
@@ -666,6 +738,7 @@
         btnStart.disabled = false;
         langSelect.disabled = false;
         chkContinuous.disabled = false;
+        chkRefine.disabled = false;
         chkOffline.disabled = false;
         pauseSlider.disabled = false;
         setStatus(msg);

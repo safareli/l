@@ -692,26 +692,27 @@ systemd.user.services.opencode-web = {
     };
   };
 
-  systemd.user.services.stt2-server = {
-    Unit = {
-      Description = "STT2 HTTP API server (offline English, ONNX)";
-      After = [ "network.target" ];
-    };
-    Service = {
-      Environment = [
-        "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
-      ];
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt2-server";
-      ExecStart = "%h/.local/bin/stt2-server --host 127.0.0.1 --port 6773";
-      StandardOutput = "append:%h/.local/share/stt2-server/stt2-server.log";
-      StandardError = "append:%h/.local/share/stt2-server/stt2-server.log";
-      Restart = "on-failure";
-      RestartSec = 10;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # stt2-server disabled — Parakeet covers offline English STT and uses less memory
+  # systemd.user.services.stt2-server = {
+  #   Unit = {
+  #     Description = "STT2 HTTP API server (offline English, ONNX)";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     Environment = [
+  #       "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+  #     ];
+  #     ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt2-server";
+  #     ExecStart = "%h/.local/bin/stt2-server --host 127.0.0.1 --port 6773";
+  #     StandardOutput = "append:%h/.local/share/stt2-server/stt2-server.log";
+  #     StandardError = "append:%h/.local/share/stt2-server/stt2-server.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 10;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
   systemd.user.services.parakeet-server = {
     Unit = {

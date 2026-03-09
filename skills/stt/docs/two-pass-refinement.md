@@ -327,33 +327,33 @@ ws://host:6771/stream?lang=en&continuous=true&silence_ms=400&refine=true&refinem
 ## Implementation Steps
 
 ### Phase 1: Server Plumbing
-1. [ ] Add `RefinementRequest` dataclass to `continuous.py`
+1. [x] Add `RefinementRequest` dataclass to `continuous.py`
    - Fields: `wav_bytes`, `seq_start`, `seq_end`
-2. [ ] Add audio buffering to `ContinuousSession.feed_audio()`
+2. [x] Add audio buffering to `ContinuousSession.feed_audio()`
    - Append every PCM chunk to `_refinement_audio_chunks`
    - Track `_refinement_audio_ms`
-3. [ ] Add utterance-end detection (separate from 400ms segment boundary)
+3. [x] Add utterance-end detection (separate from 400ms segment boundary)
    - 2s silence threshold after speech
    - 30s max duration fallback
-4. [ ] Emit `RefinementRequest` when triggered
-5. [ ] Add WAV assembly helper (PCM chunks → in-memory WAV bytes)
+4. [x] Emit `RefinementRequest` when triggered
+5. [x] Add WAV assembly helper (PCM chunks → in-memory WAV bytes)
 
 ### Phase 2: WebSocket Integration
-6. [ ] Update `__init__.py` WebSocket handler to detect `refine=true` param
-7. [ ] Handle `RefinementRequest` results from `feed_audio()`
-8. [ ] Implement `do_refinement()` async task (POST to Parakeet, send `refined` msg)
-9. [ ] Handle edge cases:
+6. [x] Update `__init__.py` WebSocket handler to detect `refine=true` param
+7. [x] Handle `RefinementRequest` results from `feed_audio()`
+8. [x] Implement `do_refinement()` async task (POST to Parakeet, send `refined` msg)
+9. [x] Handle edge cases:
    - WebSocket closes before refinement completes → cancel task
    - Parakeet server unavailable → log warning, skip refinement
-   - Overlapping refinements → queue or skip
+   - Overlapping refinements → `_refinement_pending` flag prevents overlap
 
 ### Phase 3: Client
-10. [ ] Add `☑ Refine (Parakeet)` checkbox to controls
-11. [ ] Include `&refine=true` in WebSocket URL when checked
-12. [ ] Handle `refined` message type in JS
-13. [ ] Implement segment replacement logic
-14. [ ] Add CSS for refined segments (green border, fade animation)
-15. [ ] Show refinement metadata (model name, latency)
+10. [x] Add `☑ Refine (Parakeet)` checkbox to controls
+11. [x] Include `&refine=true` in WebSocket URL when checked
+12. [x] Handle `refined` message type in JS
+13. [x] Implement segment replacement logic
+14. [x] Add CSS for refined segments (green border, fade animation)
+15. [x] Show refinement metadata (model name, latency)
 
 ### Phase 4: Testing & Polish
 16. [ ] Test with bench_continuous.py (verify segments align correctly)
