@@ -9,9 +9,11 @@ description = "Speech-to-text using NVIDIA NeMo FastConformer (English & Georgia
 requires-python = ">=3.11,<3.12"
 
 dependencies = [
+    "aiohttp>=3.9",
     "nemo_toolkit[asr]==2.1.0",
     "numpy<2",
     "onnx>=1.20.1",
+    "onnx-asr[cpu,hub]",
     "onnxruntime>=1.24.3",
     "onnxscript>=0.6.2",
     "torch",
@@ -21,9 +23,12 @@ dependencies = [
 [project.scripts]
 stt-nemo = "stt_nemo:main"
 stt-streaming = "stt_streaming:main"
+stt2-nemo = "stt2:main"
+stt2-server = "stt2.server:serve_main"
+parakeet-server = "stt_parakeet.server:serve_main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/stt_nemo", "src/stt_streaming"]
+packages = ["src/stt_nemo", "src/stt_streaming", "src/stt2", "src/stt_parakeet"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

@@ -11,14 +11,28 @@ Transcribe audio files to text. Supports any audio format that ffmpeg can decode
 
 | Backend | Languages | Speed (CPU) | Quality | Notes |
 |---------|-----------|-------------|---------|-------|
-| **NeMo FastConformer** (default) | English, Georgian | ~0.15x RTF | Excellent | NVIDIA model, 115M params, ~460MB each |
+| **stt2 (ONNX)** ⭐ | English | **0.03x RTF** | Excellent + punctuation | ONNX Runtime, 3.5s startup, ~500MB RAM |
+| **stt (NeMo/PyTorch)** | English, Georgian | ~0.15x RTF | Excellent + punctuation | PyTorch, ~14s startup, ~1.8GB RAM |
 | **whisper-cpp** (`--whisper`) | English only | ~0.33x RTF | Good | OpenAI Whisper small.en, 244M params |
 
-NeMo is **~2x faster** than whisper-cpp on CPU with comparable or better accuracy.
+**For English, use `stt2`** — 4x faster than PyTorch NeMo, 4x less startup time, 3.5x less memory. Same model, same accuracy (1.6% WER).
 
 ## Usage
 
-`stt` is available on PATH via home-manager.
+### stt2 (recommended for English)
+
+```bash
+# Transcribe audio file
+stt2 ./recording.mp3
+
+# Transcribe from URL
+stt2 https://example.com/audio.ogg
+
+# Custom output directory
+stt2 ./recording.mp3 --outdir ./transcripts
+```
+
+### stt (multi-language, PyTorch)
 
 ```bash
 # Transcribe audio (auto-detects language by default)
@@ -28,39 +42,46 @@ stt ./recording.mp3
 stt ./recording.mp3 --lang en
 stt ./recording.mp3 --lang ka
 
-# Transcribe from an HTTP URL
-stt https://example.com/audio.ogg
-
 # Use whisper-cpp instead of NeMo (English only)
 stt ./recording.mp3 --whisper
-
-# Include timestamps (whisper only)
-stt ./recording.mp3 --whisper --timestamps
-
-# Custom output directory (default: /tmp/stt/)
-stt ./recording.mp3 --outdir ./transcripts
 ```
 
 ### Options
 
-- `-l, --lang <auto|en|ka>` - Language (default: `auto`). `auto` detects spoken language via langid_ambernet, then routes to the matching STT model. Supported explicit values: `en` (English), `ka` (Georgian)
-- `--whisper` - Use whisper-cpp backend instead of NeMo (English only)
+**stt2:**
 - `--outdir <dir>` - Output directory (default: `/tmp/stt/`)
-- `--timestamps` - Include timestamps in transcript output (whisper backend only)
+
+**stt:**
+- `-l, --lang <auto|en|ka>` - Language (default: `auto`)
+- `--whisper` - Use whisper-cpp backend (English only)
+- `--outdir <dir>` - Output directory (default: `/tmp/stt/`)
+- `--timestamps` - Include timestamps (whisper only)
 
 ## Architecture
 
-- `stt` — thin wrapper script (handles ffmpeg conversion, URLs, output files), calls `stt-nemo`
-- `stt-nemo` — shell wrapper that runs `uv run python -m stt_nemo` (uv manages the Python venv + deps from `pyproject.toml` + `uv.lock`)
+### stt2 (ONNX, English-only)
+
+- `stt2` — wrapper script (ffmpeg conversion, URLs, output files), calls `stt2-nemo`
+- `stt2-nemo` — shell wrapper that runs `uv run python -m stt2`
+- `src/stt2/` — ONNX Runtime transcriber: numpy mel preprocessing → ONNX encoder → RNN-T/CTC decode
+- ONNX models: `~/.cache/stt-onnx/en/` (exported via `scripts/export_onnx_offline.py`)
+- **No PyTorch or NeMo at runtime** — just numpy + onnxruntime (~500MB total)
+
+### stt (PyTorch, multi-language)
+
+- `stt` — wrapper script (ffmpeg conversion, URLs, output files), calls `stt-nemo`
+- `stt-nemo` — shell wrapper that runs `uv run python -m stt_nemo`
 - `whisper-cli` — nix package from nixpkgs (used with `--whisper` flag)
 
 ### Packaging
 
 Nix (via home-manager) provides system deps: `uv`, `ffmpeg`, `python3.11`, `whisper-cpp`.
-Python dependencies (PyTorch CPU, NeMo toolkit, etc.) are managed by **uv** using `pyproject.toml` + `uv.lock`. On first run, uv creates a `.venv/` and installs everything (~500MB cached in `~/.cache/uv`).
+Python dependencies (PyTorch CPU, NeMo toolkit, etc.) are managed by **uv** using `pyproject.toml` + `uv.lock`.
 
 - **`pyproject.toml`** + **`uv.lock`** — Python dependency specification
-- **`src/stt_nemo/`** — Python module for NeMo transcription
+- **`src/stt2/`** — ONNX offline transcriber (English)
+- **`src/stt_nemo/`** — PyTorch/NeMo transcriber (English + Georgian)
+- **`src/stt_streaming/`** — ONNX streaming transcriber (WebSocket server)
 
 ## Output
 
@@ -90,4 +111,13 @@ Models are downloaded on first use to `~/.cache/huggingface/hub/` (~460MB each).
 
 ## Benchmark
 
-See `bench/bench.sh` for the full benchmark script. Run with: `cd skills/stt && bash bench/bench.sh`
+81.2s English audio, CPU:
+
+| Backend | Total time | Startup | Inference | RTF | WER | Punctuation |
+|---------|-----------|---------|-----------|-----|-----|-------------|
+| **stt2 (ONNX)** | **3.5s** | 1.1s | 2.2s | 0.03x | 1.6% | ✅ |
+| **stt2-server (HTTP)** | **2.1s** | 0 (preloaded) | 2.1s | 0.03x | 1.6% | ✅ |
+| stt (PyTorch) | 13.8s | ~10s | ~3.5s | 0.17x | 1.6% | ✅ |
+| stt --whisper | ~27s | ~1s | ~26s | 0.33x | — | ❌ |
+
+See also `bench/bench.sh` for the full benchmark script.

@@ -40,7 +40,7 @@ binary frame (PCM bytes)       ──────────►  same loop...
 
 These are the streaming counterparts of the offline models used by `stt-nemo`. Same architecture (`EncDecHybridRNNTCTCBPEModel`), same size (~460MB each), but trained with cache-aware streaming so they can process chunks incrementally without needing to see the full audio.
 
-The English model supports multiple latency modes via attention context size configuration. Lower look-ahead = lower latency but slightly worse accuracy. Default is 80ms (`--att-context-size 70,1`).
+The English model supports multiple latency modes via attention context size configuration. Default is 0ms look-ahead (`--att-context-size 70,0`) which matches offline accuracy (1.6% WER) while staying comfortably real-time with ONNX (0.28x RT).
 
 ### Offline vs streaming model comparison
 
@@ -82,12 +82,19 @@ cd ~/.config/home-manager/skills/stt
 
 ONNX Runtime replaces PyTorch for encoder/decoder inference, providing ~6.8x speedup on the encoder forward pass (165ms → 24ms per chunk). This brings streaming from 1.34x real-time (too slow) to comfortably under 1.0x real-time.
 
+ONNX mode also uses ~60% less memory than PyTorch mode because it does NOT load PyTorch or NeMo at all. Mel spectrogram extraction and streaming chunk management are handled by lightweight numpy-only implementations (`MelPreprocessor` and `StreamingBuffer`).
+
+| Mode | Memory (RSS) | Dependencies loaded |
+|------|-------------|-------------------|
+| PyTorch | ~2.0 GB | torch + nemo + model weights |
+| ONNX | ~0.8 GB | numpy + onnxruntime + ONNX models |
+
 **First-time setup — export ONNX models:**
 
 ```bash
 cd ~/.config/home-manager/skills/stt
 
-# Export English model (~435 MB encoder + ~20 MB decoder)
+# Export English model (~435 MB encoder + ~20 MB decoder + preprocessor config)
 uv run --python python3.11 python scripts/export_onnx.py --langs en
 
 # Export Georgian model
@@ -97,9 +104,7 @@ uv run --python python3.11 python scripts/export_onnx.py --langs ka
 uv run --python python3.11 python scripts/export_onnx.py --langs en,ka
 ```
 
-ONNX models are saved to `~/.cache/stt-streaming-onnx/<lang>/`. The export needs the PyTorch model (downloaded automatically) and takes a few minutes per language.
-
-**Note:** The NeMo PyTorch model is still loaded at startup for the mel preprocessor and `CacheAwareStreamingAudioBuffer`. Only the encoder/decoder inference runs through ONNX Runtime. This is the short-term approach — the preprocessor is not the bottleneck (the encoder is 95%+ of inference time).
+ONNX models are saved to `~/.cache/stt-streaming-onnx/<lang>/`. The export needs the PyTorch model (downloaded automatically) and takes a few minutes per language. It also saves the mel filterbank matrix and preprocessor config so that ONNX runtime mode can operate without PyTorch/NeMo.
 
 ### CLI options
 
@@ -107,7 +112,7 @@ ONNX models are saved to `~/.cache/stt-streaming-onnx/<lang>/`. The export needs
 --host HOST              Bind host (default: 0.0.0.0)
 --port PORT              Bind port (default: 6771)
 --langs LANGS            Comma-separated: en, ka (default: en)
---att-context-size L,R   EN model attention context (default: 70,1 = 80ms)
+--att-context-size L,R   EN model attention context (default: 70,0 = 0ms)
                          Options: 70,0 (0ms) / 70,1 (80ms) / 70,6 (480ms) / 70,13 (1040ms)
 --threads N              CPU threads for inference (default: 4)
                          For batch_size=1 streaming, 2-4 is usually optimal.
@@ -135,9 +140,11 @@ uv run python test_streaming.py recording.wav ws://localhost:6771/stream?lang=ka
 ```
 ws://host:port/stream?lang=en
 ws://host:port/stream?lang=ka
+ws://host:port/stream?lang=en&continuous=true
+ws://host:port/stream?lang=en&continuous=true&silence_ms=800&max_segment_ms=60000
 ```
 
-Language is specified as a query parameter. Client specifies the language upfront — the server needs to know which model to use before audio arrives.
+Language is specified as a query parameter. Client specifies the language upfront — the server needs to know which model to use before audio arrives. Add `continuous=true` for auto-segmented long-running streams (see Continuous mode below).
 
 ### Client → Server
 
@@ -151,9 +158,9 @@ Language is specified as a query parameter. Client specifies the language upfron
 
 | Message | Description |
 |---------|-------------|
-| `{"type":"ready","lang":"en","sample_rate":16000,"encoding":"pcm_s16le","channels":1}` | Session initialized, ready to receive audio. |
-| `{"type":"partial","text":"hello wor"}` | Interim transcription. Sent after each model chunk is processed. The text grows incrementally as more audio arrives. May update/correct earlier words. |
-| `{"type":"final","text":"hello world."}` | Final transcription after `{"type":"end"}` signal. Includes any remaining audio that was buffered. |
+| `{"type":"ready","lang":"en","continuous":false,"sample_rate":16000,"encoding":"pcm_s16le","channels":1}` | Session initialized, ready to receive audio. |
+| `{"type":"partial","text":"hello wor"}` | Interim transcription. Sent after each model chunk is processed. The text grows incrementally as more audio arrives. May update/correct earlier words. In continuous mode, includes `"seq":N`. |
+| `{"type":"final","text":"hello world."}` | Final transcription after `{"type":"end"}` signal or silence boundary (continuous mode). In continuous mode, includes `"seq":N`. |
 | `{"type":"error","message":"..."}` | Error message. |
 
 ### Audio format
@@ -177,9 +184,13 @@ ws.send(int16.buffer);
 
 ```
 src/stt_streaming/
-  __init__.py       # Model loading, Session class, WebSocket server, CLI
-  __main__.py       # Entry point
-  onnx_session.py   # ONNX Runtime-based Session (OnnxSession) + greedy RNN-T decoding
+  __init__.py           # WebSocket server, CLI (no torch imports at module level)
+  __main__.py           # Entry point
+  pytorch_session.py    # PyTorch/NeMo Session + model loading (imported only without --onnx)
+  onnx_session.py       # ONNX Runtime OnnxSession + greedy RNN-T decoding (no torch/nemo)
+  mel_preprocessor.py   # Pure numpy mel spectrogram (replaces NeMo preprocessor for ONNX)
+  streaming_buffer.py   # Pure numpy streaming buffer (replaces CacheAwareStreamingAudioBuffer)
+  continuous.py         # ContinuousSession — silence-based auto-segmentation wrapper
 
 scripts/
   export_onnx.py    # One-time script to export PyTorch models to ONNX format
@@ -191,11 +202,13 @@ test_streaming.py   # Test client: streams a WAV file to the server
   en/
     encoder-model.onnx         # 435 MB — FastConformer encoder with streaming cache I/O
     decoder_joint-model.onnx   # 20 MB — RNN-T decoder + joint network
-    metadata.json              # vocab, blank_id, cache shapes, streaming config
+    metadata.json              # vocab, blank_id, cache shapes, streaming + preprocessor config
+    mel_filterbank.npy         # 80 KB — precomputed mel filterbank matrix
   ka/
     encoder-model.onnx         # 435 MB
     decoder_joint-model.onnx   # 20 MB
     metadata.json
+    mel_filterbank.npy
 ```
 
 ### Key components
@@ -213,9 +226,13 @@ test_streaming.py   # Test client: streams a WAV file to the server
 
 **`Session.finalize()`** — Pads remaining audio with 560ms of silence (ensures last partial chunk fills a complete model chunk), processes with `keep_all_outputs=True`, returns final text.
 
-**`OnnxSession`** — Drop-in replacement for `Session` when `--onnx` is used. Same `feed_audio()` / `finalize()` API. Uses NeMo's preprocessor and `CacheAwareStreamingAudioBuffer` for mel extraction (same as `Session`), but replaces `conformer_stream_step` with:
+**`OnnxSession`** — Drop-in replacement for `Session` when `--onnx` is used. Same `feed_audio()` / `finalize()` API. Uses lightweight numpy-only `MelPreprocessor` and `StreamingBuffer` for mel extraction and chunking (NO PyTorch/NeMo dependency), and replaces `conformer_stream_step` with:
 1. ONNX Runtime encoder inference (the 6.8x speedup)
 2. Custom `greedy_rnnt_decode()` loop using ONNX decoder+joint model
+
+**`MelPreprocessor`** — Pure numpy reimplementation of NeMo's `AudioToMelSpectrogramPreprocessor` (FilterbankFeatures). Computes log-mel spectrograms using numpy FFT, matching NeMo's output within 0.0003% relative error. Config and mel filterbank matrix are loaded from metadata.json and mel_filterbank.npy (saved during ONNX export).
+
+**`StreamingBuffer`** — Pure numpy reimplementation of NeMo's `CacheAwareStreamingAudioBuffer`. Handles mel feature extraction via `MelPreprocessor`, buffer management, and chunk iteration with pre-encode cache overlap. Produces identical chunks to NeMo's implementation (verified in tests).
 
 **`greedy_rnnt_decode()`** — Greedy RNN-T decoding loop. For each encoder time step, runs the decoder+joint ONNX model to predict tokens until blank is emitted, then moves to the next time step. The decoder+joint model is only 20MB so each call is <1ms.
 
@@ -264,26 +281,43 @@ A variant: keep both models loaded and run langid on the initial buffer to pick 
 
 ### Continuous mode (long-running streams)
 
-Currently each WebSocket session handles **one utterance**: audio comes in, partials stream back, client sends `{"type":"end"}`, server sends final. Good for push-to-talk / voice messages.
+For **live captioning, meeting transcription, always-on mic** — the stream stays open indefinitely. The server automatically detects silence boundaries and segments audio into discrete utterances.
 
-For **continuous mode** (live captioning, meeting transcription, always-on mic), the stream stays open indefinitely. The server needs to automatically detect utterance boundaries and reset model caches between them, because:
+**Connect with `?continuous=true`:**
 
-1. **Cache quality degrades** — The streaming models are optimized for utterance-length audio (5-30s). Caches grow stale over minutes.
-2. **Memory grows** — The internal feature buffer grows indefinitely.
-3. **UX** — Users want completed sentences/phrases delivered as discrete units, not one infinite string.
+```
+ws://host:port/stream?lang=en&continuous=true
+ws://host:port/stream?lang=en&continuous=true&silence_ms=800&max_segment_ms=60000
+```
 
-Implementation approach:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `continuous` | `false` | Enable auto-segmentation |
+| `silence_ms` | `800` | Silence duration (ms) to trigger segment boundary |
+| `max_segment_ms` | `60000` | Force boundary after this duration (0 = disabled) |
 
-- Add **energy-based silence detection** on the server side: track RMS energy of incoming audio chunks. When energy drops below a threshold for N milliseconds (e.g., 800ms of silence), treat it as an utterance boundary.
-- On boundary: send `{"type":"final"}` for the current utterance, reset `Session` caches, start fresh for the next utterance.
-- Add a sequence counter so the client can track which utterance each partial/final belongs to:
-  ```json
-  {"type":"partial", "text":"hello world", "seq":0}
-  {"type":"final",   "text":"hello world.", "seq":0}
-  {"type":"partial", "text":"how are",     "seq":1}
-  {"type":"final",   "text":"how are you?","seq":1}
-  ```
-- Could optionally use **Silero VAD** (a small, fast voice activity detection model) instead of simple energy thresholds for more robust boundary detection, but energy-based detection is simpler and good enough for v1.
+**Protocol with `seq` counters:**
+
+```json
+{"type":"partial", "text":"hello world", "seq":0}
+{"type":"final",   "text":"hello world",  "seq":0}   ← silence detected
+{"type":"partial", "text":"how are",      "seq":1}
+{"type":"partial", "text":"how are you",  "seq":1}
+{"type":"final",   "text":"how are you",  "seq":1}   ← silence detected
+```
+
+Finals are emitted automatically when silence exceeds the threshold. The client still sends `{"type":"end"}` to flush the last segment when done.
+
+**How it works:**
+
+- `ContinuousSession` wraps `OnnxSession` (or `Session`), splitting input into 100ms sub-chunks for RMS energy analysis
+- When consecutive silence exceeds `silence_ms`, the current segment is finalized (560ms flush padding), model caches reset, and a new segment starts
+- `max_segment_ms` forces a boundary even during continuous speech (prevents infinite segments)
+- Memory stays bounded: `StreamingBuffer` trims consumed mel frames (only keeps last 9 for pre-encode cache)
+
+**Note on cache quality:** The encoder uses fixed-size sliding-window caches (attention: 70 frames ≈ 5.6s, convolution: 8 frames). These are overwritten every step and cannot "grow stale". Segmentation is for UX (discrete sentences) and error recovery, not cache quality.
+
+**Future:** Could replace RMS energy detection with [Silero VAD](https://github.com/snakers4/silero-vad) (small ONNX model, ~2MB) for more robust boundary detection in noisy environments.
 
 ### Punctuation and capitalization
 

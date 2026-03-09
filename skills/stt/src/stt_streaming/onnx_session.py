@@ -5,12 +5,14 @@ Replaces PyTorch encoder/decoder inference with ONNX Runtime for ~6.8x
 speedup on the encoder forward pass (165ms → 24ms per chunk), enabling
 comfortable real-time streaming on CPU.
 
-The NeMo preprocessor and CacheAwareStreamingAudioBuffer are still used
-for mel spectrogram extraction and chunk management — these are fast
-numpy/torch operations, not the bottleneck.
+This module has NO dependency on PyTorch or NeMo. Mel spectrogram extraction
+and streaming chunk management are handled by lightweight numpy-based
+MelPreprocessor and StreamingBuffer classes.
+
+Memory usage: ~500-600MB total (ONNX models + numpy/onnxruntime runtime).
+Compare with ~2GB when the NeMo PyTorch model was loaded alongside ONNX.
 
 Cache tensor ordering:
-  - PyTorch (get_initial_cache_state): layers-first → [num_layers, B, T, D]
   - ONNX (forward_for_export): batch-first → [B, num_layers, T, D]
 """
 
@@ -23,12 +25,32 @@ from typing import Optional
 import numpy as np
 import onnxruntime as ort
 
+from stt_streaming.mel_preprocessor import MelPreprocessor
+from stt_streaming.streaming_buffer import StreamingBuffer
+
 CACHE_BASE_DIR = os.path.expanduser("~/.cache/stt-streaming-onnx")
+
+# Metadata version — bump when adding new required fields.
+# v2 added preprocessor config + mel filterbank (no torch/nemo needed).
+METADATA_VERSION = 2
 
 
 def _log(msg: str):
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", file=sys.stderr)
+
+
+def _decode_tokens(token_ids: list[int], vocab: list[str]) -> str:
+    """
+    Decode token IDs to text using the saved vocabulary.
+
+    SentencePiece convention: '▁' (U+2581) represents a word boundary (space).
+    """
+    if not token_ids:
+        return ""
+    pieces = [vocab[tid] if tid < len(vocab) else f"<unk_{tid}>" for tid in token_ids]
+    text = "".join(pieces).replace("\u2581", " ").strip()
+    return text
 
 
 def load_onnx_sessions(
@@ -41,11 +63,11 @@ def load_onnx_sessions(
 
     Returns {lang: {"encoder": ort.InferenceSession,
                     "decoder_joint": ort.InferenceSession,
-                    "metadata": dict,
-                    "model": NeMo model}} dict.
+                    "metadata": dict}} dict.
 
-    Also loads the NeMo model for each language (needed for preprocessor
-    and CacheAwareStreamingAudioBuffer).
+    NO PyTorch or NeMo models are loaded. The mel preprocessor config and
+    filterbank matrix are loaded from metadata.json and mel_filterbank.npy
+    (saved during ONNX export).
     """
     sessions = {}
 
@@ -54,18 +76,32 @@ def load_onnx_sessions(
         encoder_path = os.path.join(lang_dir, "encoder-model.onnx")
         decoder_path = os.path.join(lang_dir, "decoder_joint-model.onnx")
         metadata_path = os.path.join(lang_dir, "metadata.json")
+        filterbank_path = os.path.join(lang_dir, "mel_filterbank.npy")
 
         if not all(os.path.exists(p) for p in [encoder_path, decoder_path, metadata_path]):
             _log(f"ONNX models not found for {lang} in {lang_dir}")
             _log(f"  Run: uv run --python python3.11 python scripts/export_onnx.py --langs {lang}")
             continue
 
-        _log(f"Loading ONNX sessions for {lang}...")
-        t0 = time.monotonic()
-
         # Load metadata
         with open(metadata_path) as f:
             metadata = json.load(f)
+
+        # Check metadata version
+        version = metadata.get("version", 1)
+        if version < METADATA_VERSION:
+            _log(f"ONNX metadata for {lang} is version {version}, need {METADATA_VERSION}.")
+            _log(f"  Re-export: uv run --python python3.11 python scripts/export_onnx.py --langs {lang}")
+            _log(f"  (Delete {lang_dir} first to force re-export)")
+            continue
+
+        if not os.path.exists(filterbank_path):
+            _log(f"Mel filterbank not found for {lang}: {filterbank_path}")
+            _log(f"  Re-export ONNX models to generate it.")
+            continue
+
+        _log(f"Loading ONNX sessions for {lang}...")
+        t0 = time.monotonic()
 
         # Configure ONNX Runtime session options
         sess_opts = ort.SessionOptions()
@@ -90,50 +126,19 @@ def load_onnx_sessions(
         elapsed = time.monotonic() - t0
         _log(f"  ONNX sessions loaded for {lang} in {elapsed:.1f}s")
 
-        # Now load the NeMo model for preprocessor + streaming buffer
-        _log(f"  Loading NeMo model for {lang} preprocessor...")
-        t0 = time.monotonic()
-
-        # Suppress NeMo logging
-        import warnings
-        import logging
-        os.environ["NEMO_TESTING"] = "1"
-        logging.disable(logging.WARNING)
-        warnings.filterwarnings("ignore")
-
-        import torch
-        torch.set_num_threads(num_threads)
-        torch.set_num_interop_threads(1)
-
-        import nemo.collections.asr as nemo_asr
-        model = nemo_asr.models.EncDecHybridRNNTCTCBPEModel.from_pretrained(
-            metadata["model_name"]
-        )
-
-        # Configure attention context for English multi-latency model.
-        # Use the CLI-provided att_context_size if given, otherwise use
-        # the left context from the exported cache shape.
-        if lang == "en" and hasattr(model.encoder, "set_default_att_context_size"):
-            if att_context_size_en:
-                model.encoder.set_default_att_context_size(att_context_size_en)
-            else:
-                left_ctx = metadata["cache_last_channel_shape"][2]  # e.g. 70
-                model.encoder.set_default_att_context_size([left_ctx, 1])
-
-        if not hasattr(model.encoder, "streaming_cfg") or model.encoder.streaming_cfg is None:
-            model.encoder.setup_streaming_params()
-
-        model.eval()
-
-        elapsed = time.monotonic() - t0
-        _log(f"  NeMo model loaded for {lang} preprocessor in {elapsed:.1f}s")
+        # Load mel filterbank
+        filterbank = np.load(filterbank_path)
+        _log(f"  Mel filterbank: {filterbank.shape}")
 
         sessions[lang] = {
             "encoder": enc_sess,
             "decoder_joint": dec_sess,
             "metadata": metadata,
-            "model": model,
+            "filterbank": filterbank,
         }
+
+    if sessions:
+        _log(f"ONNX mode: no PyTorch/NeMo loaded — lightweight numpy-only preprocessing")
 
     return sessions
 
@@ -207,13 +212,15 @@ class OnnxSession:
     Per-connection ONNX-based streaming session.
 
     Drop-in replacement for the PyTorch Session class. Uses ONNX Runtime
-    for encoder and decoder+joint inference, with NeMo's preprocessor and
-    CacheAwareStreamingAudioBuffer for mel extraction and chunking.
+    for encoder and decoder+joint inference, with lightweight numpy-based
+    MelPreprocessor and StreamingBuffer for mel extraction and chunking.
+
+    NO dependency on PyTorch or NeMo.
     """
 
     SAMPLE_RATE = 16000
-    MIN_PREPROCESS_MS = 200
-    MIN_PREPROCESS_SAMPLES = SAMPLE_RATE * MIN_PREPROCESS_MS // 1000  # 3200
+    MIN_PREPROCESS_MS = 100
+    MIN_PREPROCESS_SAMPLES = SAMPLE_RATE * MIN_PREPROCESS_MS // 1000  # 1600
     MIN_PREPROCESS_BYTES = MIN_PREPROCESS_SAMPLES * 2
     FLUSH_PAD_MS = 560
     FLUSH_PAD_SAMPLES = SAMPLE_RATE * FLUSH_PAD_MS // 1000
@@ -221,20 +228,16 @@ class OnnxSession:
     def __init__(self, session_data: dict, lang: str):
         """
         Args:
-            session_data: dict with keys "encoder", "decoder_joint", "metadata", "model"
+            session_data: dict with keys "encoder", "decoder_joint", "metadata", "filterbank"
             lang: language code
         """
-        import torch
-        from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
-
         self.encoder_sess = session_data["encoder"]
         self.decoder_joint_sess = session_data["decoder_joint"]
         self.metadata = session_data["metadata"]
-        self.model = session_data["model"]
         self.lang = lang
 
-        # Tokenizer from the NeMo model
-        self.tokenizer = self.model.tokenizer
+        # Vocabulary for token decoding
+        self.vocab = self.metadata["vocab"]
 
         # Blank ID
         self.blank_id = self.metadata["blank_id"]
@@ -242,8 +245,19 @@ class OnnxSession:
         # Raw PCM accumulator
         self.pcm_buffer = bytearray()
 
-        # NeMo's streaming buffer for mel extraction and chunking
-        self.streaming_buffer = CacheAwareStreamingAudioBuffer(model=self.model)
+        # Lightweight mel preprocessor (numpy only)
+        preprocessor = MelPreprocessor(
+            config=self.metadata["preprocessor"],
+            filterbank=session_data["filterbank"],
+        )
+
+        # Lightweight streaming buffer (numpy only)
+        self.streaming_buffer = StreamingBuffer(
+            preprocessor=preprocessor,
+            streaming_cfg=self.metadata["streaming_cfg"],
+            n_mels=self.metadata["n_mels"],
+            sampling_frames=self.metadata.get("sampling_frames"),
+        )
 
         # Encoder caches — ONNX uses batch-first format: [B, num_layers, T, D]
         ch_shape = self.metadata["cache_last_channel_shape"]  # [1, 17, 70, 512]
@@ -283,7 +297,7 @@ class OnnxSession:
         self.pcm_buffer.clear()
         self._append_audio(audio)
 
-        return self._process_chunks(is_final=False)
+        return self._process_chunks()
 
     def finalize(self) -> str:
         """Flush remaining audio and return final transcription."""
@@ -300,7 +314,10 @@ class OnnxSession:
         audio = np.concatenate([remaining, pad])
         self._append_audio(audio)
 
-        results = self._process_chunks(is_final=True)
+        # Flush any held-back mel frames from the preprocessor
+        self.streaming_buffer.flush_preprocessor()
+
+        results = self._process_chunks()
         return results[-1] if results else ""
 
     def _append_audio(self, audio: np.ndarray):
@@ -311,13 +328,21 @@ class OnnxSession:
         else:
             self.streaming_buffer.append_audio(audio, stream_id=0)
 
-    def _process_chunks(self, is_final: bool) -> list[str]:
-        """
-        Iterate over all available model chunks and run ONNX inference.
-        """
+    def _process_chunks(self) -> list[str]:
+        """Iterate over all available model chunks and run ONNX inference."""
         results = []
 
         for chunk_audio, chunk_lengths in self.streaming_buffer:
+            if self.step_num == 0:
+                # Skip first chunk — too small for ONNX encoder with drop=2.
+                # Step 0 has only chunk_size[0]=1 mel frame, which crashes
+                # the ConvSubsampling after the baked-in drop_extra_pre_encoded=2.
+                # PyTorch uses drop=0 for step 0 only, but produces no tokens.
+                # Skipping is safe: caches stay at zeros (same as PyTorch step 0
+                # output for a 1-frame input).
+                self.step_num += 1
+                results.append(_decode_tokens(self.predicted_tokens, self.vocab))
+                continue
             text = self._onnx_stream_step(chunk_audio, chunk_lengths)
             self.step_num += 1
             results.append(text)
@@ -332,8 +357,8 @@ class OnnxSession:
 
     def _onnx_stream_step(
         self,
-        processed_signal,
-        processed_signal_length,
+        processed_signal: np.ndarray,
+        processed_signal_length: np.ndarray,
     ) -> str:
         """
         One streaming step using ONNX Runtime.
@@ -341,30 +366,11 @@ class OnnxSession:
         1. Run preprocessed mel features through ONNX encoder
         2. Run greedy RNN-T decoding through ONNX decoder+joint
         3. Decode tokens to text
-
-        Note: The ONNX encoder already applies output trimming (valid_out_len)
-        and drop_extra_pre_encoded internally — these are baked into the exported
-        graph via forward_for_export → streaming_post_process(keep_all_outputs=False).
-        We don't need to do additional trimming here. For the final chunk, the
-        silence padding in finalize() ensures trailing content is pushed through.
         """
-        import torch
+        audio_signal = np.asarray(processed_signal, dtype=np.float32)
+        length = np.asarray(processed_signal_length, dtype=np.int64)
 
-        # Convert torch tensors to numpy for ONNX Runtime
-        if isinstance(processed_signal, torch.Tensor):
-            audio_signal = processed_signal.numpy()
-        else:
-            audio_signal = np.asarray(processed_signal, dtype=np.float32)
-
-        if isinstance(processed_signal_length, torch.Tensor):
-            length = processed_signal_length.numpy().astype(np.int64)
-        else:
-            length = np.asarray(processed_signal_length, dtype=np.int64)
-
-        # Pad short chunks to minimum required by the ONNX encoder.
-        # The first streaming chunk can be as small as 9 mel frames (per
-        # streaming_cfg.chunk_size[0]), but the ONNX ConvSubsampling needs
-        # at least MIN_ONNX_MEL_FRAMES to produce non-zero output.
+        # Pad short chunks to minimum required by the ONNX encoder
         T = audio_signal.shape[2]
         if T < self.MIN_ONNX_MEL_FRAMES:
             pad_width = self.MIN_ONNX_MEL_FRAMES - T
@@ -374,7 +380,6 @@ class OnnxSession:
                 mode="constant",
                 constant_values=0.0,
             )
-            # length stays the same — encoder uses it for masking
 
         # Run encoder
         enc_outputs, encoded_lengths, cache_ch_next, cache_t_next, cache_ch_len_next = (
@@ -395,12 +400,9 @@ class OnnxSession:
         self.cache_last_time = cache_t_next
         self.cache_last_channel_len = cache_ch_len_next
 
-        # enc_outputs shape: [B, D, T'] — already trimmed by ONNX encoder
-
         # Skip if no encoder output
         if enc_outputs.shape[2] == 0:
-            text = self.tokenizer.ids_to_text(self.predicted_tokens)
-            return text
+            return _decode_tokens(self.predicted_tokens, self.vocab)
 
         # Greedy RNN-T decoding
         self.predicted_tokens, self.lstm_states = greedy_rnnt_decode(
@@ -411,6 +413,4 @@ class OnnxSession:
             blank_id=self.blank_id,
         )
 
-        # Decode tokens to text
-        text = self.tokenizer.ids_to_text(self.predicted_tokens)
-        return text
+        return _decode_tokens(self.predicted_tokens, self.vocab)

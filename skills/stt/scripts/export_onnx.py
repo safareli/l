@@ -2,19 +2,22 @@
 """
 Export NeMo streaming FastConformer models to ONNX format.
 
-Produces two ONNX files per language:
+Produces per language:
   - encoder-model.onnx (~435 MB) — the FastConformer encoder with streaming cache I/O
   - decoder_joint-model.onnx (~20 MB) — the RNN-T decoder + joint network
-
-Also saves metadata.json with vocab, blank_id, cache shapes, and streaming config.
+  - metadata.json — vocab, blank_id, cache shapes, streaming config, preprocessor config
+  - mel_filterbank.npy — precomputed mel filterbank matrix [n_mels, n_fft//2+1]
 
 Output directory: ~/.cache/stt-streaming-onnx/<lang>/
+
+The metadata.json and mel_filterbank.npy enable the ONNX runtime mode to run
+WITHOUT loading PyTorch or NeMo at all — just numpy + onnxruntime.
 
 Usage:
     cd skills/stt
     uv run --python python3.11 python scripts/export_onnx.py             # export English
-    uv run --python python3.11 python scripts/export_onnx.py --langs ka  # export Georgian
-    uv run --python python3.11 python scripts/export_onnx.py --langs en,ka  # export both
+    # uv run --python python3.11 python scripts/export_onnx.py --langs ka  # Georgian (TODO)
+    # uv run --python python3.11 python scripts/export_onnx.py --langs en,ka  # both
 """
 
 import argparse
@@ -35,11 +38,15 @@ import numpy as np
 
 STREAMING_MODELS = {
     "en": "nvidia/stt_en_fastconformer_hybrid_large_streaming_multi",
-    "ka": "nvidia/stt_ka_fastconformer_hybrid_transducer_ctc_large_streaming_80ms_pc",
+    # "ka": "nvidia/stt_ka_fastconformer_hybrid_transducer_ctc_large_streaming_80ms_pc",  # TODO
 }
 
-DEFAULT_ATT_CONTEXT_SIZE_EN = [70, 1]
+DEFAULT_ATT_CONTEXT_SIZE_EN = [70, 0]
 CACHE_BASE_DIR = os.path.expanduser("~/.cache/stt-streaming-onnx")
+
+# Metadata version — bump when adding new required fields.
+# v2 added preprocessor config + mel filterbank (no torch/nemo needed at runtime).
+METADATA_VERSION = 2
 
 
 def patch_torch_onnx_export():
@@ -58,6 +65,61 @@ def patch_torch_onnx_export():
 
     torch.onnx.export = patched_export
     print("  Patched torch.onnx.export to use legacy mode (dynamo=False)", file=sys.stderr)
+
+
+def _extract_preprocessor_config(model) -> dict:
+    """
+    Extract preprocessor configuration from a NeMo model.
+
+    Returns a dict with all parameters needed to reproduce the mel spectrogram
+    computation without NeMo at runtime.
+
+    Note: The streaming buffer uses dither=0.0 and pad_to=0 (overriding the
+    model's defaults). These streaming overrides are applied here.
+    """
+    pp = model.preprocessor.featurizer
+
+    config = {
+        "sample_rate": int(model._cfg.preprocessor.sample_rate),
+        "n_fft": int(pp.n_fft),
+        "hop_length": int(pp.hop_length),
+        "win_length": int(pp.win_length),
+        "n_mels": int(pp.nfilt),
+        "preemph": float(pp.preemph) if pp.preemph is not None else None,
+        "mag_power": float(pp.mag_power),
+        "log": bool(pp.log),
+        "log_zero_guard_type": str(pp.log_zero_guard_type),
+        "log_zero_guard_value": float(pp.log_zero_guard_value),
+        "exact_pad": bool(pp.exact_pad),
+        "pad_value": float(pp.pad_value),
+        # Streaming overrides (CacheAwareStreamingAudioBuffer.extract_preprocessor):
+        "dither": 0.0,   # forced to 0 for streaming
+        "pad_to": 0,     # forced to 0 for streaming
+        # Original normalize setting (kept as-is when online_normalization=None):
+        "normalize": str(model._cfg.preprocessor.get("normalize", "NA")),
+    }
+
+    return config
+
+
+def _extract_mel_filterbank(model) -> np.ndarray:
+    """
+    Extract the mel filterbank matrix from a NeMo model.
+
+    Returns numpy array of shape [n_mels, n_fft//2+1], float32.
+    """
+    fb = model.preprocessor.featurizer.fb  # [1, n_mels, n_fft//2+1]
+    return fb.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+def _extract_sampling_frames(model) -> list[int] | None:
+    """Extract sampling_frames from the encoder's pre_encode module."""
+    if hasattr(model.encoder, "pre_encode") and hasattr(model.encoder.pre_encode, "get_sampling_frames"):
+        sf = model.encoder.pre_encode.get_sampling_frames()
+        if isinstance(sf, (list, tuple)):
+            return [int(x) for x in sf]
+        return [int(sf)]
+    return None
 
 
 def export_lang(lang: str, att_context_size_en=None):
@@ -103,7 +165,10 @@ def export_lang(lang: str, att_context_size_en=None):
     elapsed = time.monotonic() - t0
     print(f"  Model loaded in {elapsed:.1f}s", file=sys.stderr)
 
-    # Extract metadata before export
+    # -----------------------------------------------------------------------
+    # Extract metadata (before export, while model is fully loaded)
+    # -----------------------------------------------------------------------
+
     cfg = model.encoder.streaming_cfg
     tokenizer = model.tokenizer
 
@@ -120,13 +185,20 @@ def export_lang(lang: str, att_context_size_en=None):
 
     # Cache shapes from initial state
     cache_ch, cache_t, cache_ch_len = model.encoder.get_initial_cache_state(batch_size=1)
-    # These are layers-first: [num_layers, B, T, D] and [num_layers, B, D, T_conv]
-    # ONNX export uses batch-first: [B, num_layers, T, D]
     num_layers = cache_ch.shape[0]
-    cache_ch_T = cache_ch.shape[2]  # e.g. 70
-    cache_ch_D = cache_ch.shape[3]  # e.g. 512
-    cache_t_D = cache_t.shape[2]    # e.g. 512
-    cache_t_T = cache_t.shape[3]    # e.g. 8
+    cache_ch_T = cache_ch.shape[2]
+    cache_ch_D = cache_ch.shape[3]
+    cache_t_D = cache_t.shape[2]
+    cache_t_T = cache_t.shape[3]
+
+    # Extract preprocessor config and mel filterbank
+    preprocessor_config = _extract_preprocessor_config(model)
+    mel_filterbank = _extract_mel_filterbank(model)
+    sampling_frames = _extract_sampling_frames(model)
+
+    print(f"  Preprocessor config: {preprocessor_config}", file=sys.stderr)
+    print(f"  Mel filterbank shape: {mel_filterbank.shape}", file=sys.stderr)
+    print(f"  Sampling frames: {sampling_frames}", file=sys.stderr)
 
     def _to_json_val(v):
         """Convert streaming config values (may be int or list) to JSON-safe types."""
@@ -135,6 +207,7 @@ def export_lang(lang: str, att_context_size_en=None):
         return int(v)
 
     metadata = {
+        "version": METADATA_VERSION,
         "lang": lang,
         "model_name": model_name,
         "blank_id": int(blank_id),
@@ -151,22 +224,24 @@ def export_lang(lang: str, att_context_size_en=None):
         },
         "sample_rate": 16000,
         "n_mels": 80,
+        "preprocessor": preprocessor_config,
+        "sampling_frames": sampling_frames,
     }
 
     # Get decoder LSTM hidden size from the RNNTDecoder
     pred_net = model.decoder
-    metadata["lstm_hidden_size"] = int(pred_net.pred_hidden)       # typically 640
-    metadata["lstm_num_layers"] = int(pred_net.pred_rnn_layers)    # typically 1
+    metadata["lstm_hidden_size"] = int(pred_net.pred_hidden)
+    metadata["lstm_num_layers"] = int(pred_net.pred_rnn_layers)
 
+    # -----------------------------------------------------------------------
     # Export ONNX
-    # Set drop_extra_pre_encoded=0 before export. This value gets baked into the
-    # ONNX graph. If left at the default (2), the first chunk (9 mel frames) would
-    # subsample to ~2 frames, then drop 2, resulting in 0 frames — which crashes
-    # the Conv node. With drop=0, all chunks produce valid output. The output is
-    # still trimmed by valid_out_len (via streaming_post_process), so the extra
-    # pre-encoded frames only add a slight overlap in the conformer context.
-    model.encoder.streaming_cfg.drop_extra_pre_encoded = 0
-    print(f"  Set drop_extra_pre_encoded=0 for ONNX compatibility", file=sys.stderr)
+    # -----------------------------------------------------------------------
+
+    # Keep native drop_extra_pre_encoded (=2 for 0ms look-ahead).
+    # The ONNX graph bakes in the drop=2 slice, so step 0 (1 mel frame →
+    # too few subsampled frames after drop) must be skipped at runtime.
+    # The runtime OnnxSession skips step 0 to handle this.
+    print(f"  drop_extra_pre_encoded={cfg.drop_extra_pre_encoded} (native, baked into ONNX)", file=sys.stderr)
 
     print(f"  Configuring export with cache_support=True...", file=sys.stderr)
     model.set_export_config({"cache_support": True})
@@ -195,11 +270,19 @@ def export_lang(lang: str, att_context_size_en=None):
             print(f"  ✗ {name}: {path} NOT FOUND", file=sys.stderr)
             return False
 
-    # Save metadata
+    # -----------------------------------------------------------------------
+    # Save metadata + mel filterbank
+    # -----------------------------------------------------------------------
+
     metadata_path = os.path.join(output_dir, "metadata.json")
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
     print(f"  ✓ metadata: {metadata_path}", file=sys.stderr)
+
+    filterbank_path = os.path.join(output_dir, "mel_filterbank.npy")
+    np.save(filterbank_path, mel_filterbank)
+    fb_size_kb = os.path.getsize(filterbank_path) / 1024
+    print(f"  ✓ filterbank: {filterbank_path} ({fb_size_kb:.1f} KB)", file=sys.stderr)
 
     print(f"\n  Export successful for {lang}!", file=sys.stderr)
     return True
@@ -216,8 +299,8 @@ def main():
     )
     parser.add_argument(
         "--att-context-size",
-        default="70,1",
-        help="Attention context size for EN model as 'left,right' (default: 70,1)",
+        default="70,0",
+        help="Attention context size for EN model as 'left,right' (default: 70,0 = 0ms look-ahead)",
     )
     args = parser.parse_args()
 

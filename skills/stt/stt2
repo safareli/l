@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""
+stt2 - Fast offline English speech-to-text (ONNX)
+
+No PyTorch, no NeMo. Just numpy + onnxruntime.
+Outputs punctuated, capitalized text.
+
+Usage: stt2 <audio_file_or_url> [--ctc] [--outdir <dir>]
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.parse
+from pathlib import Path
+
+DEFAULT_OUTDIR = "/tmp/stt"
+
+# Where stt2-nemo lives (same dir as this script → skills/stt)
+SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def download_file(url: str, dest_dir: str) -> str:
+    print(f"Downloading: {url}", file=sys.stderr)
+    req = urllib.request.Request(url, headers={"User-Agent": "stt2/1.0"})
+    resp = urllib.request.urlopen(req)
+    cd = resp.headers.get("Content-Disposition", "")
+    match = re.search(r'filename[^;=\n]*=["\']?([^"\';\n]+)', cd)
+    filename = match.group(1).strip() if match else os.path.basename(urllib.parse.urlparse(url).path)
+    if not filename or filename == "/":
+        filename = "audio_download"
+    filename = sanitize_name(filename)
+    dest = os.path.join(dest_dir, f"dl-{int(time.time() * 1000)}-{filename}")
+    data = resp.read()
+    with open(dest, "wb") as f:
+        f.write(data)
+    print(f"Downloaded: {dest} ({len(data) / 1024:.1f} KB)", file=sys.stderr)
+    return dest
+
+
+def sanitize_name(name: str) -> str:
+    return re.sub(r"_+", "_", re.sub(r"[^\w.\-]", "_", name))[:80]
+
+
+def convert_to_wav(input_path: str, wav_path: str) -> None:
+    print("Converting to 16kHz mono WAV...", file=sys.stderr)
+    result = subprocess.run(
+        ["ffmpeg", "-i", input_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path, "-y"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed:\n{result.stderr}")
+
+
+def is_url(s: str) -> bool:
+    return s.startswith("http://") or s.startswith("https://")
+
+
+def cleanup(*paths: str):
+    for p in paths:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="stt2", description="Fast offline English STT (ONNX)")
+    parser.add_argument("input", help="Audio file path or HTTP URL")
+    parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help=f"Output directory (default: {DEFAULT_OUTDIR})")
+    args = parser.parse_args()
+
+    os.makedirs(args.outdir, exist_ok=True)
+    ts = int(time.time() * 1000)
+    tmp_files: list[str] = []
+
+    try:
+        # Resolve input
+        if is_url(args.input):
+            audio_path = download_file(args.input, args.outdir)
+            tmp_files.append(audio_path)
+        else:
+            audio_path = os.path.abspath(args.input)
+            if not os.path.isfile(audio_path):
+                print(f"Error: File not found: {audio_path}", file=sys.stderr)
+                sys.exit(1)
+
+        # Convert to WAV
+        stem = sanitize_name(Path(audio_path).stem)
+        wav_path = os.path.join(args.outdir, f"{stem}-{ts}.wav")
+        tmp_files.append(wav_path)
+        convert_to_wav(audio_path, wav_path)
+
+        # Transcribe via stt2-nemo
+        cmd = ["stt2-nemo", wav_path]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"stt2-nemo failed:\n{result.stderr}", file=sys.stderr)
+            sys.exit(1)
+
+        transcription = result.stdout.strip()
+        # Forward stt2-nemo's stderr (timing info)
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+
+        # Write output
+        output_path = os.path.join(args.outdir, f"{stem}-{ts}.txt")
+        with open(output_path, "w") as f:
+            f.write(transcription + "\n")
+
+        print(f"\nTranscript written to: {output_path}", file=sys.stderr)
+        print(f"Length: {len(transcription)} chars", file=sys.stderr)
+
+    finally:
+        cleanup(*tmp_files)
+
+
+if __name__ == "__main__":
+    main()

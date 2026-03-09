@@ -530,6 +530,38 @@ in
     executable = true;
   };
 
+  home.file.".local/bin/stt2-nemo" = {
+    text = ''
+      #!/usr/bin/env bash
+      cd "${config.xdg.configHome}/home-manager/skills/stt"
+      exec ${pkgs.uv}/bin/uv run --python python3.11 python -m stt2 "$@"
+    '';
+    executable = true;
+  };
+
+  home.file.".local/bin/stt2" = {
+    source = ./skills/stt/stt2;
+    executable = true;
+  };
+
+  home.file.".local/bin/stt2-server" = {
+    text = ''
+      #!/usr/bin/env bash
+      cd "${config.xdg.configHome}/home-manager/skills/stt"
+      exec ${pkgs.uv}/bin/uv run --python python3.11 python -c "from stt2.server import serve_main; serve_main()" "$@"
+    '';
+    executable = true;
+  };
+
+  home.file.".local/bin/parakeet-server" = {
+    text = ''
+      #!/usr/bin/env bash
+      cd "${config.xdg.configHome}/home-manager/skills/stt"
+      exec ${pkgs.uv}/bin/uv run --python python3.11 python -c "from stt_parakeet.server import serve_main; serve_main()" "$@"
+    '';
+    executable = true;
+  };
+
   home.file.".local/bin/stt-streaming" = {
     text = ''
       #!/usr/bin/env bash
@@ -652,6 +684,48 @@ systemd.user.services.opencode-web = {
       ExecStart = "%h/.local/bin/stt-streaming --host 127.0.0.1 --port 6771 --langs en --onnx";
       StandardOutput = "append:%h/.local/share/stt-streaming/stt-streaming.log";
       StandardError = "append:%h/.local/share/stt-streaming/stt-streaming.log";
+      Restart = "on-failure";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  systemd.user.services.stt2-server = {
+    Unit = {
+      Description = "STT2 HTTP API server (offline English, ONNX)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Environment = [
+        "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+      ];
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt2-server";
+      ExecStart = "%h/.local/bin/stt2-server --host 127.0.0.1 --port 6773";
+      StandardOutput = "append:%h/.local/share/stt2-server/stt2-server.log";
+      StandardError = "append:%h/.local/share/stt2-server/stt2-server.log";
+      Restart = "on-failure";
+      RestartSec = 10;
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  systemd.user.services.parakeet-server = {
+    Unit = {
+      Description = "Parakeet TDT HTTP API server (offline English, ONNX, 600M params)";
+      After = [ "network.target" ];
+    };
+    Service = {
+      Environment = [
+        "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+      ];
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/parakeet-server";
+      ExecStart = "%h/.local/bin/parakeet-server --host 127.0.0.1 --port 6774";
+      StandardOutput = "append:%h/.local/share/parakeet-server/parakeet-server.log";
+      StandardError = "append:%h/.local/share/parakeet-server/parakeet-server.log";
       Restart = "on-failure";
       RestartSec = 10;
     };

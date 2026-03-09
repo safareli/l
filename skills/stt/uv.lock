@@ -1412,6 +1412,26 @@ wheels = [
 ]
 
 [[package]]
+name = "onnx-asr"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/98/4e/fb3b27ebf75c4340bb0c7a29563ad29832e7da725c1f2b1d8b9ab5942250/onnx_asr-0.10.2.tar.gz", hash = "sha256:70381939cf82d02c1257537e7f5825c35db15008cc02a5c43a4e62b6d5acbb34", size = 43452, upload-time = "2026-01-18T19:56:01.169Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/58/951afd8d9c3ec3f67c2b6915bea25a2ce6c2fd9b482c7449bc3f21f9cdcb/onnx_asr-0.10.2-py3-none-any.whl", hash = "sha256:bb36b0eb47ba496b70fb0e856863484dc519d27a497eee142dca2519a5090995", size = 122484, upload-time = "2026-01-18T19:56:02.446Z" },
+]
+
+[package.optional-dependencies]
+cpu = [
+    { name = "onnxruntime" },
+]
+hub = [
+    { name = "huggingface-hub" },
+]
+
+[[package]]
 name = "onnx-ir"
 version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2257,9 +2277,11 @@ name = "stt-nemo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "nemo-toolkit", extra = ["asr"] },
     { name = "numpy" },
     { name = "onnx" },
+    { name = "onnx-asr", extra = ["cpu", "hub"] },
     { name = "onnxruntime" },
     { name = "onnxscript" },
     { name = "torch", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
@@ -2269,9 +2291,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "nemo-toolkit", extras = ["asr"], specifier = "==2.1.0" },
     { name = "numpy", specifier = "<2" },
     { name = "onnx", specifier = ">=1.20.1" },
+    { name = "onnx-asr", extras = ["cpu", "hub"] },
     { name = "onnxruntime", specifier = ">=1.24.3" },
     { name = "onnxscript", specifier = ">=0.6.2" },
     { name = "torch", index = "https://download.pytorch.org/whl/cpu" },
