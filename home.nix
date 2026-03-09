@@ -681,7 +681,7 @@ systemd.user.services.opencode-web = {
         "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
       ];
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-streaming";
-      ExecStart = "%h/.local/bin/stt-streaming --host 127.0.0.1 --port 6771 --langs en --onnx";
+      ExecStart = "%h/.local/bin/stt-streaming --host 127.0.0.1 --port 6771 --langs en --onnx --threads 2";
       StandardOutput = "append:%h/.local/share/stt-streaming/stt-streaming.log";
       StandardError = "append:%h/.local/share/stt-streaming/stt-streaming.log";
       Restart = "on-failure";
