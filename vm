@@ -191,8 +191,59 @@ USER_EOF
     "$0" up
     "$0" health
     ;;
+  chrome)
+    TMUX_SESSION="chrome-agent"
+    case "$2" in
+      up)
+        echo "=== STARTING CHROME ==="
+        CHROME_PROFILE_DIR="$SCRIPT_DIR/.chrome-profile"
+        mkdir -p "$CHROME_PROFILE_DIR/Default"
+        # Pre-seed a distinctive orange toolbar color so this instance is visually different
+        if [[ ! -f "$CHROME_PROFILE_DIR/Default/Preferences" ]]; then
+          cat > "$CHROME_PROFILE_DIR/Default/Preferences" <<'PREFS_EOF'
+{
+  "browser": {
+    "theme": {
+      "color_scheme": 0,
+      "user_color": -48896
+    }
+  }
+}
+PREFS_EOF
+        fi
+        if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+          echo "Chrome already running in tmux session '$TMUX_SESSION'"
+        else
+          tmux new-session -d -s "$TMUX_SESSION" \
+            "'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --remote-debugging-port=9222 --user-data-dir='$CHROME_PROFILE_DIR'"
+          echo "Chrome started in tmux session '$TMUX_SESSION'"
+        fi
+        echo "=== WAITING FOR CHROME ==="
+        for i in $(seq 1 30); do
+          if curl -s -o /dev/null http://localhost:9222/json/version; then
+            break
+          fi
+          if [ "$i" -eq 30 ]; then
+            echo "Chrome failed to start within 30s"
+            exit 1
+          fi
+          sleep 1
+        done
+        echo "=== CONNECTING AGENT BROWSER ==="
+        ssh -t -o LogLevel=QUIET "colima-$PROFILE" '$HOME/.npm-global/bin/agent-browser connect "http://192.168.5.2:9222"'
+        ;;
+      down)
+        echo "=== STOPPING CHROME ==="
+        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null && echo "Chrome stopped" || echo "No chrome session running"
+        ;;
+      *)
+        echo "Usage: vm chrome [up|down]"
+        exit 1
+        ;;
+    esac
+    ;;
   *)
-    echo "Usage: vm [setup|config|up|down|health|rm|provision|ssh]"
+    echo "Usage: vm [setup|config|up|down|health|rm|provision|ssh|chrome]"
     exit 1
     ;;
 esac

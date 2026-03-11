@@ -1,3 +1,4 @@
 .env
 hook_pre_up.sh
 hook_post_down.sh
+.chrome-profile
