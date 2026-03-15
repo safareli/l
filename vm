@@ -48,7 +48,11 @@ HOSTS_EOF
     ;;
   down)
     echo "=== STOPPING VM ==="
-    colima stop --profile "$PROFILE"
+    STOP_ARGS=(--profile "$PROFILE")
+    if [[ "$2" == "-f" ]]; then
+      STOP_ARGS+=(--force)
+    fi
+    colima stop "${STOP_ARGS[@]}"
     if [[ -x "$SCRIPT_DIR/hook_post_down.sh" ]]; then
       echo "=== Running post-down hook ==="
       "$SCRIPT_DIR/hook_post_down.sh"
