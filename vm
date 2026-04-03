@@ -9,10 +9,20 @@ PROFILE_CONFIG="$PROFILE_DIR/colima.yaml"
 
 case "$1" in
   ssh)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm ssh"
+      exit 1
+    fi
     SSH_HOST="colima-$PROFILE"
     ssh "$SSH_HOST"
     ;;
   config)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm config"
+      exit 1
+    fi
     echo "=== CONFIG ==="
     mkdir -p "$PROFILE_DIR"
     if [[ -e "$PROFILE_CONFIG" ]]; then
@@ -27,6 +37,11 @@ case "$1" in
     echo "Config copied to $PROFILE_CONFIG"
     ;;
   setup)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm setup"
+      exit 1
+    fi
     echo "=== SETUP VM ==="
     "$0" down
     "$0" config
@@ -34,6 +49,11 @@ case "$1" in
     "$0" provision
     ;;
   up)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm up"
+      exit 1
+    fi
     echo "=== STARTING VM ==="
     if [[ -x "$SCRIPT_DIR/hook_pre_up.sh" ]]; then
       echo "=== Running pre-up hook ==="
@@ -49,8 +69,12 @@ HOSTS_EOF
   down)
     echo "=== STOPPING VM ==="
     STOP_ARGS=(--profile "$PROFILE")
-    if [[ "$2" == "-f" ]]; then
+    if [[ "$2" == "-f" || "$2" == "--force" ]]; then
       STOP_ARGS+=(--force)
+    elif [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm down [-f|--force]"
+      exit 1
     fi
     colima stop "${STOP_ARGS[@]}"
     if [[ -x "$SCRIPT_DIR/hook_post_down.sh" ]]; then
@@ -59,6 +83,11 @@ HOSTS_EOF
     fi
     ;;
   health)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm health"
+      exit 1
+    fi
     echo "=== HEALTH CHECK ==="
     echo "=== VM Status (profile: $PROFILE) ==="
     colima status --profile "$PROFILE" 2>&1
@@ -99,6 +128,11 @@ HOSTS_EOF
     fi
     ;;
   rm)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm rm"
+      exit 1
+    fi
     echo "=== REMOVING VM ==="
     read -p "Delete VM profile '$PROFILE'? This will destroy all data. [y/N] " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
@@ -108,6 +142,11 @@ HOSTS_EOF
     fi
     ;;
   provision)
+    if [[ -n "$2" ]]; then
+      echo "Unknown option: $2"
+      echo "Usage: vm provision"
+      exit 1
+    fi
     echo "=== PROVISIONING VM ==="
     SSH_HOST="colima-$PROFILE"
 
