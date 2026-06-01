@@ -49,9 +49,12 @@ case "$1" in
     "$0" provision
     ;;
   up)
-    if [[ -n "$2" ]]; then
+    FORCE=false
+    if [[ "$2" == "-f" || "$2" == "--force" ]]; then
+      FORCE=true
+    elif [[ -n "$2" ]]; then
       echo "Unknown option: $2"
-      echo "Usage: vm up"
+      echo "Usage: vm up [-f|--force]"
       exit 1
     fi
     echo "=== STARTING VM ==="
@@ -59,7 +62,29 @@ case "$1" in
       echo "=== Running pre-up hook ==="
       "$SCRIPT_DIR/hook_pre_up.sh"
     fi
-    colima start --profile "$PROFILE"
+    LIMA_DIR="$HOME/.colima/_lima"
+    if $FORCE; then
+      # Remove stale disk locks left behind by unclean shutdown
+      for lock in "$LIMA_DIR"/_disks/*/in_use_by; do
+        if [[ -L "$lock" ]]; then
+          echo "Removing stale disk lock: $lock"
+          rm "$lock"
+        fi
+      done
+    fi
+    if ! colima start --profile "$PROFILE"; then
+      # Check if failure is due to stale disk locks
+      for lock in "$LIMA_DIR"/_disks/*/in_use_by; do
+        if [[ -L "$lock" ]]; then
+          echo ""
+          echo "Found stale disk lock: $lock"
+          echo "This can happen after an unclean shutdown (e.g. battery death)."
+          echo "Run 'vm up -f' to clear stale locks and retry. Also maybe try 'vm down [-f]' first"
+          exit 1
+        fi
+      done
+      exit 1
+    fi
     echo "=== Configuring /etc/hosts ==="
     ssh "colima-$PROFILE" "sudo bash -s" <<'HOSTS_EOF'
       grep -qF 'console.neon.tech' /etc/hosts || echo '192.168.5.2 console.neon.tech' >> /etc/hosts
