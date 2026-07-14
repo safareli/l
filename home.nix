@@ -1,26 +1,34 @@
-{ config, pkgs, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 
 let
-  local = { username = "safareli"; homeDirectory = "/home/safareli.linux"; };
+  local = {
+    username = "safareli";
+    homeDirectory = "/home/safareli.linux";
+  };
   whisper-model-small-en = pkgs.fetchurl {
     url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin";
     hash = "sha256-xhONbVjsyDIgl+D5h8MvG+i7ChhTKj+I9zTRu/nEHl0=";
   };
 
-  kokoro-python = pkgs.python312.withPackages (ps: [ ps.kokoro ps.soundfile ps.spacy-models.en_core_web_sm ]);
-
   # Piper TTS (inference only, no training deps)
   # Note: v1.4.1 unconditionally imports pathvalidate in __main__.py even though
   # nixpkgs puts it in the 'train' optional deps. We patch it in via override.
-  piper-tts-lite = (pkgs.piper-tts.override {
-    withTrain = false;
-    withHTTP = false;
-    withAlignment = false;
-  }).overrideAttrs (old: {
-    propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
-      pkgs.python313Packages.pathvalidate
-    ];
-  });
+  piper-tts-lite =
+    (pkgs.piper-tts.override {
+      withTrain = false;
+      withHTTP = false;
+      withAlignment = false;
+    }).overrideAttrs
+      (old: {
+        propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
+          pkgs.python313Packages.pathvalidate
+        ];
+      });
 
   # Piper voice models from HuggingFace (rhasspy/piper-voices)
   piper-voice-ka = {
@@ -47,7 +55,7 @@ let
 
   # Derivation that symlinks voice models into a single directory
   # (piper expects .onnx and .onnx.json to be co-located)
-  piper-voices = pkgs.runCommand "piper-voices" {} ''
+  piper-voices = pkgs.runCommand "piper-voices" { } ''
     mkdir -p $out
     ln -s ${piper-voice-ka.onnx} $out/ka_GE-natia-medium.onnx
     ln -s ${piper-voice-ka.json} $out/ka_GE-natia-medium.onnx.json
@@ -64,7 +72,7 @@ let
     nss
     nspr
     dbus
-    at-spi2-core     # provides libatk-1.0 + libatspi
+    at-spi2-core # provides libatk-1.0 + libatspi
     expat
     libx11
     libxcomposite
@@ -75,7 +83,7 @@ let
     libgbm
     libxcb
     libxkbcommon
-    systemd          # provides libudev
+    systemd # provides libudev
     alsa-lib
   ];
 
@@ -93,6 +101,10 @@ let
     TS_KEY = "/etc/tailscale-certs/ts.key";
     TS_HOST = "colima-l.hoki-climb.ts.net";
 
+    # npm/pnpm global install directory (PATH entry in zsh initContent)
+    NPM_CONFIG_PREFIX = "$HOME/.npm-global";
+    PNPM_HOME = "$HOME/.pnpm-global";
+
     # Default editors (used by sudoedit, git, etc.)
     EDITOR = "${pkgs.nano}/bin/nano";
     VISUAL = "${pkgs.nano}/bin/nano";
@@ -100,8 +112,20 @@ let
   };
 
   # Convert attrset to shell export lines
-  shellEnvExports = lib.concatStringsSep "\n"
-    (lib.mapAttrsToList (name: value: ''export ${name}="${value}"'') shellEnvVars);
+  shellEnvExports = lib.concatStringsSep "\n" (
+    lib.mapAttrsToList (name: value: ''export ${name}="${value}"'') shellEnvVars
+  );
+
+  # VS Code Remote / Remote-SSH injects SSL_CERT_FILE=/usr/lib/ssl/cert.pem in remote
+  # integrated terminals on this machine, but Nix commands prefer NIX_SSL_CERT_FILE.
+  # In proxied GitHub fetches, the default Nix CA bundle can fail while the injected
+  # host cert bundle works, so when SSL_CERT_FILE is already present we mirror it to
+  # NIX_SSL_CERT_FILE for interactive shells.
+  nixSslCompatExport = ''
+    if [ -n "''${SSL_CERT_FILE:-}" ]; then
+      export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
+    fi
+  '';
 in
 {
   # Home Manager needs a bit of information about you and the paths it should manage
@@ -120,85 +144,102 @@ in
   programs.home-manager.enable = true;
 
   # ============================================================================
+  # Nix maintenance (run nix-collect-garbage on schedule)
+  # checked via systemctl --user status nix-gc.timer
+  # ============================================================================
+  nix.gc = {
+    automatic = true;
+    dates = "daily";
+    randomizedDelaySec = "45min";
+    options = "--delete-older-than 7d";
+  };
+
+  # ============================================================================
   # Packages
   # ============================================================================
-  home.packages = with pkgs; [
-    # Core development
-    nodejs_25          # Latest (project flakes override with nodejs_22 LTS)
-    bun
-    zig
-    go
+  home.packages =
+    with pkgs;
+    [
+      # Core development
+      nodejs_26 # Latest (project flakes override with nodejs_22 LTS)
+      bun
+      zig
+      go
 
-    # AI tools
-    claude-code
-    opencode
-    pi
+      # AI tools
+      claude-code
+      opencode
+      pi
 
-    # Editors
-    vim
-    nano
+      # Editors
+      vim
+      nano
 
-    # CLI tools
-    jq
-    gh                 # GitHub CLI
-    fzf
-    ripgrep
-    fd
-    bat                # better cat
-    delta              # better diff pager
-    eza                # better ls
-    htop
-    btop
-    dua              # disk usage analyzer (interactive TUI)
-    ncdu             # disk usage analyzer (hardlink-aware with --shared-column unique)
-    tree
-    curl
-    wget
-    iputils            # ping, tracepath, etc.
-    lsof
-    yt-dlp
+      # CLI tools
+      jq
+      sqlite # sqlite3 CLI
+      gh # GitHub CLI
+      fzf
+      ripgrep
+      fd
+      bat # better cat
+      delta # better diff pager
+      eza # better ls
+      htop
+      btop
+      dua # disk usage analyzer (interactive TUI)
+      ncdu # disk usage analyzer (hardlink-aware with --shared-column unique)
+      tree
+      curl
+      wget
+      iputils # ping, tracepath, etc.
+      lsof
+      yt-dlp
 
-    # Process management
-    process-compose    # docker-compose for processes
+      # Process management
+      process-compose # docker-compose for processes
 
-    # Web servers
-    darkhttpd          # tiny static file server
+      # Web servers
+      darkhttpd # tiny static file server
 
-    # JSON viewers
-    # otree            # Not in nixpkgs - install via: cargo install otree
+      # JSON viewers
+      # otree            # Not in nixpkgs - install via: cargo install otree
 
-    # Filesystem tools
-    fuse-overlayfs     # Rootless overlayfs (used by fast-wt)
-    cpal               # Fast parallel hard-link directory copy (local C tool)
+      # Filesystem tools
+      fuse-overlayfs # Rootless overlayfs (used by fast-wt)
+      cpal # Fast parallel hard-link directory copy (local C tool)
 
-    # TLS / certificates
-    mkcert             # Locally-trusted dev certificates
+      # TLS / certificates
+      mkcert # Locally-trusted dev certificates
 
-    # Nix tools
-    nil                # Nix LSP
-    nixpkgs-fmt        # Nix formatter
+      # Nix tools
+      nil # Nix LSP
+      nixd # Nix language server for VS Code
+      nixpkgs-fmt # Nix formatter
 
-    # Speech-to-text
-    whisper-cpp        # whisper-cli for STT (--whisper flag)
-    uv                 # Python package manager (used by stt-nemo)
-    ffmpeg-headless    # audio format conversion
+      # Speech-to-text
+      whisper-cpp # whisper-cli for STT (--whisper flag)
+      uv # Python package manager (used by stt-nemo)
+      ffmpeg-headless # audio format conversion
 
-    # Text-to-speech (Kokoro TTS)
-    kokoro-python
-    espeak-ng          # phonemizer backend for Kokoro TTS
 
-    # Misc utilities
-    time               # GNU time (more detailed than shell builtin)
-  ] ++ playwrightLibs;
-  
+      # Misc utilities
+      time # GNU time (more detailed than shell builtin)
+    ]
+    ++ playwrightLibs;
+
   # ============================================================================
   # Shell - Bash (so hm-session-vars are sourced in bash sessions too, e.g. pi)
   # ============================================================================
   programs.bash = {
     enable = true;
-    initExtra = shellEnvExports + ''
-      eval "$(gw shell-hook bash)"
-    '';
+    initExtra =
+      shellEnvExports
+      + "\n"
+      + nixSslCompatExport
+      + ''
+        eval "$(gw shell-hook bash)"
+      '';
   };
 
   # ============================================================================
@@ -215,7 +256,7 @@ in
         "git"
         "docker"
         "fzf"
-        "z"              # directory jumping
+        "z" # directory jumping
         "history"
       ];
     };
@@ -234,6 +275,7 @@ in
 
         # Shared env vars (defined in shellEnvVars)
         ${shellEnvExports}
+        ${nixSslCompatExport}
 
         # Git worktree username prefix
         export GW_USER="irakli"
@@ -287,7 +329,7 @@ in
   programs.direnv = {
     enable = true;
     enableZshIntegration = true;
-    nix-direnv.enable = true;  # Faster nix-shell/flake loading with caching
+    nix-direnv.enable = true; # Faster nix-shell/flake loading with caching
   };
 
   # ============================================================================
@@ -328,6 +370,7 @@ in
 
       alias = {
         lg = "log --oneline --graph --decorate";
+        ll = "log --oneline --no-merges --cherry-pick --right-only origin/main...HEAD";
         fm = "fetch origin main:main";
         f = "fetch origin";
         fa = "fetch --all";
@@ -342,8 +385,8 @@ in
         cm = "commit";
         cn = "commit -n";
         ca = "commit --amend";
-        n = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1; }; f'';
-        nm = ''!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1 origin/main; }; f'';
+        n = "!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1; }; f";
+        nm = "!f() { git checkout -b irakli/$(date +%Y-%m-%d)-$1 origin/main; }; f";
         skipped = "!f() { git ls-files -v | grep ^S; }; f";
         skip = "update-index --skip-worktree";
         unskip = "update-index --no-skip-worktree";
@@ -384,12 +427,12 @@ in
   # ============================================================================
   programs.tmux = {
     enable = true;
-    shortcut = "a";  # Use Ctrl+a as prefix (like screen)
-    baseIndex = 1;   # Start windows at 1, not 0
+    shortcut = "a"; # Use Ctrl+a as prefix (like screen)
+    baseIndex = 1; # Start windows at 1, not 0
     terminal = "screen-256color";
     historyLimit = 100000;
-    escapeTime = 0;  # No delay for escape key
-    mouse = true;    # Enable mouse support
+    escapeTime = 0; # No delay for escape key
+    mouse = true; # Enable mouse support
 
     extraConfig = ''
       # Enable true color support
@@ -435,28 +478,40 @@ in
   # ============================================================================
   # VS Code Server settings (for remote dev)
   # ============================================================================
-  home.file.".vscode-server/data/Machine/settings.json".text = builtins.toJSON {
-    "terminal.integrated.defaultProfile.linux" = "zsh";
-    "terminal.integrated.env.linux" = {
-      VISUAL = "code --wait";
-      GIT_EDITOR = "code --wait";
-      SUDO_EDITOR = "code --wait";
-    };
-    "remote.autoForwardPorts" = false;
-    "remote.autoForwardPortsSource" = "process";
-    "remote.forwardOnOpen" = false;
-    "remote.otherPortsAttributes" = { onAutoForward = "ignore"; };
-  };
+  home.file.".vscode-server/data/Machine/settings.json".text = builtins.readFile (
+    (pkgs.formats.json { }).generate "vscode-server-settings.json" {
+      "nix.enableLanguageServer" = true;
+      "nix.serverPath" = "nil";
+      "nix.formatterPath" = "nixpkgs-fmt";
+      "terminal.integrated.defaultProfile.linux" = "zsh";
+      "terminal.integrated.env.linux" = {
+        VISUAL = "code --wait";
+        GIT_EDITOR = "code --wait";
+        SUDO_EDITOR = "code --wait";
+      };
+      "remote.autoForwardPorts" = false;
+      "remote.autoForwardPortsSource" = "process";
+      "remote.forwardOnOpen" = false;
+      "remote.otherPortsAttributes" = {
+        onAutoForward = "ignore";
+      };
+      "terminal.integrated.scrollback" = 100000;
+    }
+  );
 
   # ============================================================================
   # AI Agent Skills (shared across all coding agents)
   # ============================================================================
   # Skills are stored in ~/.config/home-manager/skills/
   # and symlinked to each agent's expected location
-  home.file.".pi/agent/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
-  home.file.".pi/agent/extensions".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/pi-extensions";
-  home.file.".claude/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
-  home.file.".codex/skills".source = config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".pi/agent/skills".source =
+    config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".pi/agent/extensions".source =
+    config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/pi-extensions";
+  home.file.".claude/skills".source =
+    config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
+  home.file.".codex/skills".source =
+    config.lib.file.mkOutOfStoreSymlink "${config.xdg.configHome}/home-manager/skills";
 
   # ============================================================================
   # Custom Scripts
@@ -499,7 +554,7 @@ in
     '';
     executable = true;
   };
-  
+
   home.file.".local/bin/yt-transcript" = {
     text = ''
       #!/usr/bin/env bash
@@ -571,20 +626,11 @@ in
     executable = true;
   };
 
-  home.file.".local/bin/tts" = {
-    text = ''
-      #!/usr/bin/env bash
-      exec "${kokoro-python}/bin/python3" "${config.xdg.configHome}/home-manager/skills/tts/tts" "$@"
-    '';
-    executable = true;
-  };
-
   # View GitHub Actions logs with terminal colors (aliased as 'grv')
   home.file.".local/bin/gh-run-view" = {
     source = ./skills/gh-run-view/gh-run-view.sh;
     executable = true;
   };
-
 
   # ============================================================================
   # Portal - Local services index page
@@ -600,69 +646,69 @@ in
   # systemctl --user status opencode-web
 
   # # Start/stop/restart
-  # systemctl --user start opencode-web 
+  # systemctl --user start opencode-web
   # systemctl --user stop opencode-web
-  # systemctl --user restart opencode-web 
+  # systemctl --user restart opencode-web
 
-  # # View logs 
+  # # View logs
   # journalctl --user -u opencode-web -f
 
-systemd.user.services.opencode-web = {
-    Unit = {
-      Description = "OpenCode Web UI";
-      After = [ "network.target" ];
-    };
-    Service = {
-      EnvironmentFile = "-%h/.config/home-manager/.env";
-      ExecStart = "${pkgs.opencode}/bin/opencode web --port 6767 --hostname=0.0.0.0";
-      StandardOutput = "append:%h/.local/share/opencode-web/opencode-web.log";
-      StandardError = "append:%h/.local/share/opencode-web/opencode-web.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.opencode-web = {
+  #   Unit = {
+  #     Description = "OpenCode Web UI";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     EnvironmentFile = "-%h/.config/home-manager/.env";
+  #     ExecStart = "${pkgs.opencode}/bin/opencode web --port 6767 --hostname=0.0.0.0";
+  #     StandardOutput = "append:%h/.local/share/opencode-web/opencode-web.log";
+  #     StandardError = "append:%h/.local/share/opencode-web/opencode-web.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
-  systemd.user.services.tts-server = {
-    Unit = {
-      Description = "Piper TTS Server";
-      After = [ "network.target" ];
-    };
-    Service = {
-      WorkingDirectory = "%h/dev/tts";
-      ExecStart = "%h/dev/tts/run_server.sh --host 0.0.0.0 --port 6768";
-      StandardOutput = "append:%h/.local/share/tts-server/tts-server.log";
-      StandardError = "append:%h/.local/share/tts-server/tts-server.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.tts-server = {
+  #   Unit = {
+  #     Description = "Piper TTS Server";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     WorkingDirectory = "%h/dev/tts";
+  #     ExecStart = "%h/dev/tts/run_server.sh --host 0.0.0.0 --port 6768";
+  #     StandardOutput = "append:%h/.local/share/tts-server/tts-server.log";
+  #     StandardError = "append:%h/.local/share/tts-server/tts-server.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
-  systemd.user.services.stt-http = {
-    Unit = {
-      Description = "STT HTTP transcription server";
-      After = [ "network.target" ];
-    };
-    Service = {
-      Environment = [
-        "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
-      ];
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-http";
-      ExecStart = "%h/.local/bin/stt-http-server --host 0.0.0.0 --port 6770";
-      StandardOutput = "append:%h/.local/share/stt-http/stt-http.log";
-      StandardError = "append:%h/.local/share/stt-http/stt-http.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.stt-http = {
+  #   Unit = {
+  #     Description = "STT HTTP transcription server";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     Environment = [
+  #       "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+  #     ];
+  #     ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-http";
+  #     ExecStart = "%h/.local/bin/stt-http-server --host 0.0.0.0 --port 6770";
+  #     StandardOutput = "append:%h/.local/share/stt-http/stt-http.log";
+  #     StandardError = "append:%h/.local/share/stt-http/stt-http.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
   # Pre-create log directories for systemd services that use append: log files.
   # systemd opens log files BEFORE ExecStartPre, so the dirs must already exist.
@@ -671,26 +717,26 @@ systemd.user.services.opencode-web = {
     mkdir -p "$HOME/.local/share/stt-http"
   '';
 
-  systemd.user.services.stt-streaming = {
-    Unit = {
-      Description = "Streaming STT WebSocket server (NeMo FastConformer)";
-      After = [ "network.target" ];
-    };
-    Service = {
-      Environment = [
-        "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
-      ];
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-streaming";
-      ExecStart = "%h/.local/bin/stt-streaming --host 127.0.0.1 --port 6771 --langs en --onnx --threads 2";
-      StandardOutput = "append:%h/.local/share/stt-streaming/stt-streaming.log";
-      StandardError = "append:%h/.local/share/stt-streaming/stt-streaming.log";
-      Restart = "on-failure";
-      RestartSec = 10;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.stt-streaming = {
+  #   Unit = {
+  #     Description = "Streaming STT WebSocket server (NeMo FastConformer)";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     Environment = [
+  #       "PATH=%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+  #     ];
+  #     ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/stt-streaming";
+  #     ExecStart = "%h/.local/bin/stt-streaming --host 127.0.0.1 --port 6771 --langs en --onnx --threads 1 --att-context-size 70,1";
+  #     StandardOutput = "append:%h/.local/share/stt-streaming/stt-streaming.log";
+  #     StandardError = "append:%h/.local/share/stt-streaming/stt-streaming.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 10;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
   # stt2-server disabled — Parakeet covers offline English STT and uses less memory
   # systemd.user.services.stt2-server = {
@@ -714,86 +760,88 @@ systemd.user.services.opencode-web = {
   #   };
   # };
 
-  systemd.user.services.parakeet-server = {
-    Unit = {
-      Description = "Parakeet TDT HTTP API server (offline English, ONNX, 600M params)";
-      After = [ "network.target" ];
-    };
-    Service = {
-      Environment = [
-        "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
-      ];
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/parakeet-server";
-      ExecStart = "%h/.local/bin/parakeet-server --host 127.0.0.1 --port 6774";
-      StandardOutput = "append:%h/.local/share/parakeet-server/parakeet-server.log";
-      StandardError = "append:%h/.local/share/parakeet-server/parakeet-server.log";
-      Restart = "on-failure";
-      RestartSec = 10;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.parakeet-server = {
+  #   Unit = {
+  #     Description = "Parakeet TDT HTTP API server (offline English, ONNX, 600M params)";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     Environment = [
+  #       "PATH=${pkgs.ffmpeg}/bin:%h/.local/bin:/etc/profiles/per-user/${local.username}/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+  #     ];
+  #     ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/.local/share/parakeet-server";
+  #     ExecStart = "%h/.local/bin/parakeet-server --host 127.0.0.1 --port 6774";
+  #     StandardOutput = "append:%h/.local/share/parakeet-server/parakeet-server.log";
+  #     StandardError = "append:%h/.local/share/parakeet-server/parakeet-server.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 10;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
-  systemd.user.services.stt-live = {
-    Unit = {
-      Description = "STT Live - browser UI for live transcription";
-      After = [ "network.target" ];
-    };
-    Service = {
-      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/stt-live --port 6772 --addr 0.0.0.0";
-      StandardOutput = "append:%h/.local/share/stt-live/stt-live.log";
-      StandardError = "append:%h/.local/share/stt-live/stt-live.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.stt-live = {
+  #   Unit = {
+  #     Description = "STT Live - browser UI for live transcription";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/stt-live --port 6772 --addr 127.0.0.1";
+  #     StandardOutput = "append:%h/.local/share/stt-live/stt-live.log";
+  #     StandardError = "append:%h/.local/share/stt-live/stt-live.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
-  systemd.user.services.portal = {
-    Unit = {
-      Description = "Portal - Local services index";
-      After = [ "network.target" ];
-    };
-    Service = {
-      ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/portal --port 1111 --addr 0.0.0.0";
-      StandardOutput = "append:%h/.local/share/portal/portal.log";
-      StandardError = "append:%h/.local/share/portal/portal.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.portal = {
+  #   Unit = {
+  #     Description = "Portal - Local services index";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     ExecStart = "${pkgs.darkhttpd}/bin/darkhttpd %h/.local/share/portal --port 1111 --addr 0.0.0.0";
+  #     StandardOutput = "append:%h/.local/share/portal/portal.log";
+  #     StandardError = "append:%h/.local/share/portal/portal.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
-  systemd.user.services.ttyd = {
-    Unit = {
-      Description = "ttyd - Web terminal";
-      After = [ "network.target" ];
-    };
-    Service = {
-      ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 -t scrollback=100000 ${pkgs.zsh}/bin/zsh";
-      StandardOutput = "append:%h/.local/share/ttyd/ttyd.log";
-      StandardError = "append:%h/.local/share/ttyd/ttyd.log";
-      Restart = "on-failure";
-      RestartSec = 5;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.ttyd = {
+  #   Unit = {
+  #     Description = "ttyd - Web terminal";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     ExecStart = "${pkgs.ttyd}/bin/ttyd -W -p 6769 -t scrollback=100000 ${pkgs.zsh}/bin/zsh";
+  #     StandardOutput = "append:%h/.local/share/ttyd/ttyd.log";
+  #     StandardError = "append:%h/.local/share/ttyd/ttyd.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 5;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 
   systemd.user.services.tailscale-cert-renew = {
     Unit.Description = "Renew Tailscale cert";
     Service = {
       Type = "oneshot";
-      ExecStart = toString (pkgs.writeShellScript "tailscale-cert-renew" ''
-        DOMAIN=$(${pkgs.tailscale}/bin/tailscale status --json | ${pkgs.jq}/bin/jq -r '.Self.DNSName | rtrimstr(".")')
-        ${pkgs.tailscale}/bin/tailscale cert --cert-file /etc/tailscale-certs/ts.crt --key-file /etc/tailscale-certs/ts.key "$DOMAIN"
-      '');
+      ExecStart = toString (
+        pkgs.writeShellScript "tailscale-cert-renew" ''
+          DOMAIN=$(${pkgs.tailscale}/bin/tailscale status --json | ${pkgs.jq}/bin/jq -r '.Self.DNSName | rtrimstr(".")')
+          ${pkgs.tailscale}/bin/tailscale cert --cert-file /etc/tailscale-certs/ts.crt --key-file /etc/tailscale-certs/ts.key "$DOMAIN"
+        ''
+      );
     };
   };
 
@@ -806,22 +854,22 @@ systemd.user.services.opencode-web = {
     Install.WantedBy = [ "timers.target" ];
   };
 
-  systemd.user.services.ko-bot = {
-    Unit = {
-      Description = "ko - Telegram Pi agent bot";
-      After = [ "network.target" ];
-    };
-    Service = {
-      WorkingDirectory = "%h/dev/ko";
-      EnvironmentFile = "%h/dev/ko/.env";
-      ExecStart = "/nix/var/nix/profiles/default/bin/nix develop %h/dev/ko --no-update-lock-file --command bash -c 'export PATH=\"%h/.local/bin:$PATH\" && exec bun run start'";
-      StandardOutput = "append:%h/.local/share/ko-bot/ko-bot.log";
-      StandardError = "append:%h/.local/share/ko-bot/ko-bot.log";
-      Restart = "on-failure";
-      RestartSec = 10;
-    };
-    Install = {
-      WantedBy = [ "default.target" ];
-    };
-  };
+  # systemd.user.services.ko-bot = {
+  #   Unit = {
+  #     Description = "ko - Telegram Pi agent bot";
+  #     After = [ "network.target" ];
+  #   };
+  #   Service = {
+  #     WorkingDirectory = "%h/dev/ko";
+  #     EnvironmentFile = "%h/dev/ko/.env";
+  #     ExecStart = "/nix/var/nix/profiles/default/bin/nix develop %h/dev/ko --no-update-lock-file --command bash -c 'export PATH=\"%h/.local/bin:$PATH\" && exec bun run start'";
+  #     StandardOutput = "append:%h/.local/share/ko-bot/ko-bot.log";
+  #     StandardError = "append:%h/.local/share/ko-bot/ko-bot.log";
+  #     Restart = "on-failure";
+  #     RestartSec = 10;
+  #   };
+  #   Install = {
+  #     WantedBy = [ "default.target" ];
+  #   };
+  # };
 }

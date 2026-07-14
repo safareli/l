@@ -93,6 +93,7 @@
               };
 
               nativeBuildInputs = [ prev.autoPatchelfHook ];
+              buildInputs = [ prev.stdenv.cc.cc.lib ];
 
               installPhase = ''
                 runHook preInstall
