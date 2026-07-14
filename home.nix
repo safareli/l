@@ -15,20 +15,12 @@ let
     hash = "sha256-xhONbVjsyDIgl+D5h8MvG+i7ChhTKj+I9zTRu/nEHl0=";
   };
 
-  # Piper TTS (inference only, no training deps)
-  # Note: v1.4.1 unconditionally imports pathvalidate in __main__.py even though
-  # nixpkgs puts it in the 'train' optional deps. We patch it in via override.
-  piper-tts-lite =
-    (pkgs.piper-tts.override {
-      withTrain = false;
-      withHTTP = false;
-      withAlignment = false;
-    }).overrideAttrs
-      (old: {
-        propagatedBuildInputs = (old.propagatedBuildInputs or [ ]) ++ [
-          pkgs.python313Packages.pathvalidate
-        ];
-      });
+  # Piper TTS (inference only, no training/HTTP/alignment deps)
+  piper-tts-lite = pkgs.piper-tts.override {
+    withTrain = false;
+    withHTTP = false;
+    withAlignment = false;
+  };
 
   # Piper voice models from HuggingFace (rhasspy/piper-voices)
   piper-voice-ka = {
@@ -495,6 +487,10 @@ in
       "remote.otherPortsAttributes" = {
         onAutoForward = "ignore";
       };
+      # Prevent VS Code's Python/Python Environments extensions from injecting
+      # `source .../.venv/bin/activate` into every newly-created terminal.
+      "python.terminal.activateEnvironment" = false;
+      "python-envs.terminal.autoActivationType" = "off";
       "terminal.integrated.scrollback" = 100000;
     }
   );

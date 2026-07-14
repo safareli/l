@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live STT</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        max-width: 700px;
+        margin: 0 auto;
+        padding: 40px 20px;
+        background: #fafafa;
+        color: #333;
+      }
+      h1 { font-weight: 300; font-size: 2.2em; margin-bottom: 0.3em; }
+      .subtitle { color: #888; margin-bottom: 1.5em; font-size: 0.95em; }
+
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 1.5em;
+        flex-wrap: wrap;
+      }
+      button {
+        padding: 0.7em 2em;
+        font-size: 1em;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 500;
+        transition: background 0.2s, transform 0.1s;
+      }
+      button:active { transform: scale(0.97); }
+      #btn-start {
+        background: #2563eb;
+        color: white;
+      }
+      #btn-start:hover { background: #1d4ed8; }
+      #btn-start.recording {
+        background: #dc2626;
+      }
+      #btn-start.recording:hover { background: #b91c1c; }
+      #btn-start:disabled {
+        background: #94a3b8;
+        cursor: not-allowed;
+      }
+      #btn-clear {
+        background: #e2e8f0;
+        color: #475569;
+      }
+      #btn-clear:hover { background: #cbd5e1; }
+      #lang-select {
+        padding: 0.7em 1em;
+        font-size: 1em;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        background: white;
+        color: #334155;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      #lang-select:focus { outline: none; border-color: #2563eb; }
+
+      .toggle-label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.9em;
+        color: #475569;
+        cursor: pointer;
+        user-select: none;
+      }
+      .toggle-label input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: #2563eb;
+      }
+
+      .pause-control {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.85em;
+        color: #64748b;
+      }
+      .pause-control.visible { display: flex; }
+      .pause-control input[type="range"] {
+        width: 90px;
+        accent-color: #2563eb;
+      }
+      .pause-control .pause-val {
+        min-width: 3.5em;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #status {
+        font-size: 0.85em;
+        color: #64748b;
+        flex: 1;
+        text-align: right;
+      }
+      #status.error { color: #dc2626; }
+      #status.ok { color: #16a34a; }
+
+      #transcript {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5em;
+        min-height: 200px;
+        max-height: 70vh;
+        overflow-y: auto;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        line-height: 1.7;
+        font-size: 1.05em;
+      }
+      #transcript:empty::before {
+        content: "Press Start and speak into your microphone…";
+        color: #94a3b8;
+        font-style: italic;
+      }
+
+      .offline-result {
+        margin-top: 1.2em;
+        display: none;
+      }
+      .offline-result.visible { display: block; }
+      .offline-result .offline-header {
+        font-size: 0.85em;
+        font-weight: 600;
+        color: #64748b;
+        margin-bottom: 0.4em;
+        display: flex;
+        align-items: center;
+        gap: 0.5em;
+      }
+      .offline-result .offline-header .elapsed {
+        font-weight: 400;
+        color: #94a3b8;
+      }
+      .offline-result .offline-body {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5em;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        line-height: 1.7;
+        font-size: 1.05em;
+      }
+      .offline-result .offline-body.loading {
+        color: #94a3b8;
+        font-style: italic;
+      }
+      .offline-result .offline-body.error-text {
+        color: #dc2626;
+      }
+      #stt2-result .offline-body { border-left: 4px solid #2563eb; }
+      #parakeet-result .offline-body { border-left: 4px solid #16a34a; }
+      .segment { margin-bottom: 0.3em; }
+      .segment .seq-badge {
+        display: inline-block;
+        font-size: 0.7em;
+        background: #e2e8f0;
+        color: #64748b;
+        border-radius: 4px;
+        padding: 0.1em 0.45em;
+        margin-right: 0.3em;
+        font-weight: 600;
+        vertical-align: middle;
+        font-variant-numeric: tabular-nums;
+      }
+      .final { color: #1e293b; }
+      .partial { color: #94a3b8; }
+      .segment.refined {
+        border-left: 3px solid #16a34a;
+        padding-left: 0.5em;
+        animation: refined-fade 0.6s ease-out;
+      }
+      .segment .refined-meta {
+        display: block;
+        font-size: 0.72em;
+        color: #94a3b8;
+        margin-top: 0.1em;
+      }
+      @keyframes refined-fade {
+        from { background: #f0fdf4; }
+        to   { background: transparent; }
+      }
+
+      .info {
+        margin-top: 1.5em;
+        padding: 1em 1.2em;
+        background: #f1f5f9;
+        border-radius: 8px;
+        font-size: 0.82em;
+        color: #64748b;
+        line-height: 1.5;
+      }
+      .info code {
+        background: #e2e8f0;
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+        font-size: 0.95em;
+      }
+      a { color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>🎤 Live Speech-to-Text</h1>
+    <p class="subtitle">Real-time transcription via streaming FastConformer (ONNX)</p>
+
+    <div class="controls">
+      <select id="lang-select">
+        <option value="en" selected>English</option>
+        <option value="ka">ქართული</option>
+      </select>
+      <label class="toggle-label">
+        <input type="checkbox" id="chk-continuous">
+        Continuous
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="chk-raw-mic">
+        Raw mic
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="chk-refine">
+        Refine (Parakeet)
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="chk-offline">
+        Compare offline
+      </label>
+      <span class="pause-control" id="pause-control">
+        Pause:
+        <input type="range" id="pause-slider" min="200" max="1500" step="50" value="400">
+        <span class="pause-val" id="pause-val">0.4s</span>
+      </span>
+      <button id="btn-start">Start</button>
+      <button id="btn-clear">Clear</button>
+      <span id="status"></span>
+    </div>
+
+    <div id="transcript"></div>
+
+    <div id="stt2-result" class="offline-result">
+      <div class="offline-header">
+        📋 FastConformer (stt2-server, port 6773)
+        <span class="elapsed" id="stt2-elapsed"></span>
+      </div>
+      <div class="offline-body" id="stt2-body"></div>
+    </div>
+
+    <div id="parakeet-result" class="offline-result">
+      <div class="offline-header">
+        🦜 Parakeet TDT 0.6B v2 (port 6774)
+        <span class="elapsed" id="parakeet-elapsed"></span>
+      </div>
+      <div class="offline-body" id="parakeet-body"></div>
+    </div>
+
+    <div class="info">
+      Audio is streamed as raw 16 kHz PCM over WebSocket to
+      <code>stt-streaming</code> on port <strong>6771</strong>.<br>
+      <strong>Continuous</strong> mode auto-segments on silence pauses
+      — ideal for meetings and live captioning.<br>
+      <strong>Raw mic</strong> disables echo cancellation and noise suppression
+      — use to transcribe audio playing on this computer.<br>
+      Microphone access requires a <strong>secure context</strong> (HTTPS or localhost).
+      <a href="/" id="portal-link">← Portal</a>
+    </div>
+
+    <script>
+      // ── AudioWorklet processor (inlined as Blob) ──────────────────────
+      const PROCESSOR_CODE = `
+        class PCMProcessor extends AudioWorkletProcessor {
+          process(inputs) {
+            const ch = inputs[0]?.[0];
+            if (ch && ch.length > 0) {
+              const buf = new Int16Array(ch.length);
+              for (let i = 0; i < ch.length; i++) {
+                buf[i] = Math.max(-32768, Math.min(32767, ch[i] * 32768));
+              }
+              this.port.postMessage(buf.buffer, [buf.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor('pcm-processor', PCMProcessor);
+      `;
+
+      // ── State ─────────────────────────────────────────────────────────
+      let audioCtx = null;
+      let workletNode = null;
+      let micStream = null;
+      let ws = null;
+      let running = false;
+      let stopping = false;
+      let stopTimeout = null;
+      let continuous = false;
+      let offlineCompare = false;
+      let audioChunks = [];  // buffered PCM Int16 ArrayBuffers for offline compare
+
+      // Segments: [{seq, text, final}]
+      // Non-continuous: single segment (seq=0), partials update it, final completes
+      // Continuous: auto-segmented, each silence boundary adds a new segment
+      let segments = [];
+
+      const btnStart    = document.getElementById('btn-start');
+      const btnClear    = document.getElementById('btn-clear');
+      const statusEl    = document.getElementById('status');
+      const transcriptEl = document.getElementById('transcript');
+      const langSelect  = document.getElementById('lang-select');
+      const chkContinuous = document.getElementById('chk-continuous');
+      const chkRawMic    = document.getElementById('chk-raw-mic');
+      const chkRefine    = document.getElementById('chk-refine');
+      const chkOffline   = document.getElementById('chk-offline');
+
+      const stt2ResultEl   = document.getElementById('stt2-result');
+      const stt2BodyEl     = document.getElementById('stt2-body');
+      const stt2ElapsedEl  = document.getElementById('stt2-elapsed');
+
+      const parakeetResultEl   = document.getElementById('parakeet-result');
+      const parakeetBodyEl     = document.getElementById('parakeet-body');
+      const parakeetElapsedEl  = document.getElementById('parakeet-elapsed');
+      const pauseControl = document.getElementById('pause-control');
+      const pauseSlider  = document.getElementById('pause-slider');
+      const pauseValEl   = document.getElementById('pause-val');
+
+      // Show/hide pause slider when continuous is toggled
+      chkContinuous.addEventListener('change', () => {
+        pauseControl.classList.toggle('visible', chkContinuous.checked);
+        // Refine requires continuous mode
+        if (!chkContinuous.checked && chkRefine.checked) {
+          chkRefine.checked = false;
+        }
+      });
+      // Refine auto-enables continuous
+      chkRefine.addEventListener('change', () => {
+        if (chkRefine.checked && !chkContinuous.checked) {
+          chkContinuous.checked = true;
+          pauseControl.classList.add('visible');
+        }
+      });
+      pauseSlider.addEventListener('input', () => {
+        pauseValEl.textContent = (pauseSlider.value / 1000).toFixed(1) + 's';
+      });
+
+      // Portal link: same host, port 1111
+      document.getElementById('portal-link').href =
+        `${location.protocol}//${location.hostname}:1111`;
+
+      // ── Segment helpers ───────────────────────────────────────────────
+      function getOrCreateSegment(seq) {
+        let seg = segments.find(s => s.seq === seq);
+        if (!seg) {
+          seg = { seq, text: '', final: false };
+          segments.push(seg);
+        }
+        return seg;
+      }
+
+      function handlePartial(msg) {
+        if (continuous && msg.seq != null) {
+          const seg = getOrCreateSegment(msg.seq);
+          seg.text = msg.text || '';
+        } else {
+          // Non-continuous: update the single active segment
+          if (segments.length === 0) {
+            segments.push({ seq: 0, text: '', final: false });
+          }
+          const active = segments[segments.length - 1];
+          if (!active.final) {
+            active.text = msg.text || '';
+          }
+        }
+        render();
+      }
+
+      function handleFinal(msg) {
+        if (continuous && msg.seq != null) {
+          const seg = getOrCreateSegment(msg.seq);
+          if (msg.text) seg.text = msg.text;
+          seg.final = true;
+        } else {
+          // Non-continuous: finalize the active segment
+          if (segments.length === 0) {
+            segments.push({ seq: 0, text: '', final: false });
+          }
+          const active = segments[segments.length - 1];
+          if (msg.text) active.text = msg.text;
+          active.final = true;
+        }
+        render();
+      }
+
+      function handleRefined(msg) {
+        const start = msg.seq_start;
+        const end = msg.seq_end;
+
+        // Remove old segments in range [seq_start, seq_end]
+        segments = segments.filter(s => s.seq < start || s.seq > end);
+
+        // Insert single refined segment using seq_start so it sorts correctly
+        const refined = {
+          seq: start,
+          text: msg.text,
+          final: true,
+          refined: true,
+          refinedModel: msg.model || 'parakeet',
+          refinedElapsed: msg.elapsed_s || 0,
+        };
+
+        // Insert in correct position
+        const insertIdx = segments.findIndex(s => s.seq > start);
+        if (insertIdx === -1) {
+          segments.push(refined);
+        } else {
+          segments.splice(insertIdx, 0, refined);
+        }
+
+        render();
+      }
+
+      // ── Render ────────────────────────────────────────────────────────
+      function render() {
+        let html = '';
+        for (const seg of segments) {
+          const cls = seg.final ? 'final' : 'partial';
+          const segCls = seg.refined ? 'segment refined' : 'segment';
+          const badge = continuous
+            ? `<span class="seq-badge">${seg.seq + 1}</span>`
+            : '';
+          if (seg.text) {
+            let meta = '';
+            if (seg.refined) {
+              meta = `<span class="refined-meta">🦜 refined in ${seg.refinedElapsed.toFixed(2)}s</span>`;
+            }
+            html += `<div class="${segCls}"><span class="${cls}">${badge}${esc(seg.text)}</span>${meta}</div>`;
+          }
+        }
+        transcriptEl.innerHTML = html;
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+
+      function esc(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+
+      function setStatus(msg, cls) {
+        statusEl.textContent = msg;
+        statusEl.className = cls || '';
+      }
+
+      // ── Start ─────────────────────────────────────────────────────────
+      async function start() {
+        try {
+          btnStart.disabled = true;
+          setStatus('Requesting microphone…');
+
+          continuous = chkContinuous.checked;
+          offlineCompare = chkOffline.checked;
+          audioChunks = [];
+          if (offlineCompare) {
+            stt2ResultEl.classList.remove('visible');
+            stt2BodyEl.textContent = '';
+            stt2ElapsedEl.textContent = '';
+            parakeetResultEl.classList.remove('visible');
+            parakeetBodyEl.textContent = '';
+            parakeetElapsedEl.textContent = '';
+          }
+
+          const rawMic = chkRawMic.checked;
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 16000,
+              echoCancellation: !rawMic,
+              noiseSuppression: !rawMic,
+              autoGainControl: true,
+            }
+          });
+
+          // Force 16 kHz context so browser resamples for us
+          audioCtx = new AudioContext({ sampleRate: 16000 });
+
+          // Load worklet
+          const blob = new Blob([PROCESSOR_CODE], { type: 'application/javascript' });
+          const blobUrl = URL.createObjectURL(blob);
+          await audioCtx.audioWorklet.addModule(blobUrl);
+          URL.revokeObjectURL(blobUrl);
+
+          const source = audioCtx.createMediaStreamSource(micStream);
+          workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor');
+
+          // Connect through silent gain so the graph stays active
+          const silence = audioCtx.createGain();
+          silence.gain.value = 0;
+          source.connect(workletNode);
+          workletNode.connect(silence);
+          silence.connect(audioCtx.destination);
+
+          // WebSocket — use wss:// when page is served over HTTPS
+          const lang = langSelect.value;
+          const refineEnabled = chkRefine.checked;
+          const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+          let wsUrl = `${wsProto}://${location.hostname}:6771/stream?lang=${lang}`;
+          if (continuous) {
+            wsUrl += `&continuous=true&silence_ms=${pauseSlider.value}`;
+          }
+          if (refineEnabled && continuous) {
+            wsUrl += `&refine=true`;
+          }
+          langSelect.disabled = true;
+          chkContinuous.disabled = true;
+          chkRefine.disabled = true;
+          chkOffline.disabled = true;
+          pauseSlider.disabled = true;
+          setStatus('Connecting to WS…');
+          ws = new WebSocket(wsUrl);
+
+          ws.onopen = () => {
+            running = true;
+            btnStart.disabled = false;
+            btnStart.textContent = 'Stop';
+            btnStart.classList.add('recording');
+            const modeLabel = continuous ? '🔴 Listening (continuous)…' : '🔴 Listening…';
+            setStatus(modeLabel, 'ok');
+          };
+
+          ws.onmessage = (ev) => {
+            const msg = JSON.parse(ev.data);
+            switch (msg.type) {
+              case 'ready':
+                setStatus(
+                  continuous ? '🔴 Listening (continuous, model ready)' : '🔴 Listening (model ready)',
+                  'ok'
+                );
+                break;
+              case 'partial':
+                handlePartial(msg);
+                break;
+              case 'final':
+                handleFinal(msg);
+                if (stopping) finishStop();
+                break;
+              case 'refined':
+                handleRefined(msg);
+                break;
+              case 'error':
+                setStatus(`Error: ${msg.message}`, 'error');
+                break;
+            }
+          };
+
+          ws.onerror = () => {
+            setStatus('WebSocket error', 'error');
+            if (stopping) finishStop();
+            else if (running) stop();
+          };
+
+          ws.onclose = () => {
+            if (stopping) finishStop();
+            else if (running) {
+              setStatus('WebSocket closed', 'error');
+              stop();
+            }
+          };
+
+          // Pipe PCM frames to WS (and buffer for offline compare)
+          workletNode.port.onmessage = (ev) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(ev.data);
+            }
+            if (offlineCompare) {
+              audioChunks.push(new Int16Array(ev.data).slice());
+            }
+          };
+
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, 'error');
+          btnStart.disabled = false;
+          cleanup();
+        }
+      }
+
+      // ── Stop ──────────────────────────────────────────────────────────
+      function stop() {
+        running = false;
+        btnStart.classList.remove('recording');
+        btnStart.disabled = true;
+
+        // Stop the mic immediately so no new audio is sent
+        cleanupAudio();
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          // Send end signal — server will process remaining buffer and reply with final
+          stopping = true;
+          ws.send(JSON.stringify({ type: 'end' }));
+          setStatus('⏳ Finalizing transcription…');
+
+          // Safety timeout: if server takes too long, close anyway
+          stopTimeout = setTimeout(() => {
+            console.warn('Stop timeout — closing WS without final');
+            finishStop();
+          }, 120_000); // 2 minutes max
+        } else {
+          cleanupWs();
+          resetUI('Stopped');
+        }
+      }
+
+      // Called when we receive the final message after stop, or on timeout
+      function finishStop() {
+        if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; }
+        stopping = false;
+        cleanupWs();
+        resetUI('Stopped');
+
+        if (offlineCompare && audioChunks.length > 0) {
+          sendOfflineTranscribe();
+        }
+      }
+
+      async function sendOfflineTranscribe() {
+        // Merge buffered PCM chunks into a single WAV file
+        const totalSamples = audioChunks.reduce((n, c) => n + c.length, 0);
+        const merged = new Int16Array(totalSamples);
+        let offset = 0;
+        for (const chunk of audioChunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        audioChunks = [];  // free memory
+
+        const wavBlob = pcmToWav(merged, 16000);
+        const durationS = (totalSamples / 16000).toFixed(1);
+
+        // Send to both endpoints in parallel
+        const endpoints = [
+          { port: 6773, resultEl: stt2ResultEl, bodyEl: stt2BodyEl, elapsedEl: stt2ElapsedEl },
+          { port: 6774, resultEl: parakeetResultEl, bodyEl: parakeetBodyEl, elapsedEl: parakeetElapsedEl },
+        ];
+
+        for (const ep of endpoints) {
+          ep.resultEl.classList.add('visible');
+          ep.bodyEl.className = 'offline-body loading';
+          ep.bodyEl.textContent = `Transcribing ${durationS}s of audio…`;
+          ep.elapsedEl.textContent = '';
+        }
+
+        for (const ep of endpoints) {
+          (async () => {
+            try {
+              const t0 = performance.now();
+              const resp = await fetch(`https://${location.hostname}:${ep.port}/transcribe`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'audio/wav' },
+                body: wavBlob,
+              });
+              const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+              if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+              }
+
+              const data = await resp.json();
+              ep.bodyEl.className = 'offline-body';
+              ep.bodyEl.textContent = data.text || '(empty)';
+              ep.elapsedEl.textContent = `${data.duration_s}s audio → ${data.elapsed_s}s inference (${elapsed}s total)`;
+            } catch (err) {
+              ep.bodyEl.className = 'offline-body error-text';
+              ep.bodyEl.textContent = `Error: ${err.message}`;
+            }
+          })();
+        }
+      }
+
+      function pcmToWav(samples, sampleRate) {
+        // Create a minimal WAV file from Int16 PCM samples
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+        const blockAlign = numChannels * bitsPerSample / 8;
+        const dataSize = samples.length * 2;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        // RIFF header
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(view, 8, 'WAVE');
+
+        // fmt chunk
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);            // chunk size
+        view.setUint16(20, 1, true);              // PCM format
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, bitsPerSample, true);
+
+        // data chunk
+        writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        // PCM samples
+        const output = new Int16Array(buffer, 44);
+        output.set(samples);
+
+        return new Blob([buffer], { type: 'audio/wav' });
+      }
+
+      function writeString(view, offset, str) {
+        for (let i = 0; i < str.length; i++) {
+          view.setUint8(offset + i, str.charCodeAt(i));
+        }
+      }
+
+      function cleanupAudio() {
+        if (workletNode) { workletNode.disconnect(); workletNode = null; }
+        if (audioCtx) { audioCtx.close(); audioCtx = null; }
+        if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      }
+
+      function cleanupWs() {
+        if (ws) { ws.close(); ws = null; }
+      }
+
+      function cleanup() {
+        cleanupAudio();
+        cleanupWs();
+      }
+
+      function resetUI(msg) {
+        btnStart.textContent = 'Start';
+        btnStart.disabled = false;
+        langSelect.disabled = false;
+        chkContinuous.disabled = false;
+        chkRefine.disabled = false;
+        chkOffline.disabled = false;
+        pauseSlider.disabled = false;
+        setStatus(msg);
+      }
+
+      // ── Event handlers ────────────────────────────────────────────────
+      btnStart.addEventListener('click', () => {
+        if (running) stop(); else start();
+      });
+
+      btnClear.addEventListener('click', () => {
+        segments = [];
+        render();
+        stt2ResultEl.classList.remove('visible');
+        stt2BodyEl.textContent = '';
+        stt2ElapsedEl.textContent = '';
+        parakeetResultEl.classList.remove('visible');
+        parakeetBodyEl.textContent = '';
+        parakeetElapsedEl.textContent = '';
+      });
+    </script>
+  </body>
+</html>
