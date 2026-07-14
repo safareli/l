@@ -1,3 +1,4 @@
+TODO check out https://github.com/multikernel/branchfs
 # TODO: `gw` `.pnpm` copy-back reliability (atomicity + corruption prevention)
 
 ## Context

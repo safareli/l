@@ -23,22 +23,77 @@ get_current_sha256() {
   fi
 }
 
-# Get fetchzip hash by intentionally failing with wrong hash and extracting the correct one
+has_sha256() {
+  local value="$1"
+  [[ -n "$value" && "$value" == sha256-* ]]
+}
+
+get_file_sri() {
+  local url="$1"
+  local sha256
+  sha256=$(nix-prefetch-url "$url" 2>/dev/null)
+  if [ -z "$sha256" ]; then
+    echo "Failed to prefetch $url" >&2
+    return 1
+  fi
+
+  nix hash to-sri --type sha256 "$sha256" 2>/dev/null
+}
+
+# Compute the fixed-output hash used by fetchzip with stripRoot = false.
+# We download the archive through the host environment (works with local proxy/CA),
+# unpack it ourselves, then hash the unpacked directory like fetchzip does.
 get_fetchzip_hash() {
   local url="$1"
-  nix-build --no-out-link -E "
-    with import <nixpkgs> {};
-    fetchzip {
-      url = \"$url\";
-      sha256 = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\";
-      stripRoot = false;
-    }
-  " 2>&1 | grep "got:" | awk '{print $2}' || echo ""
+  local hash
+
+  hash=$(
+    URL="$url" bash <<'EOF'
+set -euo pipefail
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+archive_path=$(nix store prefetch-file "$URL" --json | jq -r '.storePath')
+mkdir -p "$tmpdir/out"
+
+case "$archive_path" in
+  *.tar.gz|*.tgz)
+    tar -xzf "$archive_path" -C "$tmpdir/out"
+    ;;
+  *.tar.xz|*.txz)
+    tar -xJf "$archive_path" -C "$tmpdir/out"
+    ;;
+  *.tar.bz2|*.tbz2)
+    tar -xjf "$archive_path" -C "$tmpdir/out"
+    ;;
+  *.zip)
+    unzip -q "$archive_path" -d "$tmpdir/out"
+    ;;
+  *)
+    echo "Unsupported archive format: $archive_path" >&2
+    exit 1
+    ;;
+esac
+
+nix hash path --type sha256 "$tmpdir/out"
+EOF
+  )
+
+  if [ -z "$hash" ]; then
+    echo "Failed to compute fetchzip hash for $url" >&2
+    return 1
+  fi
+
+  echo "$hash"
 }
 
 CURRENT_CLAUDE=$(get_current_version "claude-code")
+CURRENT_CLAUDE_SHA=$(get_current_sha256 "claude-code")
 CURRENT_OPENCODE=$(get_current_version "opencode")
+CURRENT_OPENCODE_SHA=$(get_current_sha256 "opencode")
 CURRENT_PI=$(get_current_version "pi")
+CURRENT_PI_SHA=$(get_current_sha256 "pi")
 
 echo "Checking for updates..."
 
@@ -46,42 +101,52 @@ echo "Checking for updates..."
 echo -n "  claude-code: "
 CLAUDE_GCS="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
 CLAUDE_VERSION=$(curl -sL "$CLAUDE_GCS/latest")
-if [ "$CLAUDE_VERSION" = "$CURRENT_CLAUDE" ]; then
+if [ "$CLAUDE_VERSION" = "$CURRENT_CLAUDE" ] && has_sha256 "$CURRENT_CLAUDE_SHA"; then
   echo "$CLAUDE_VERSION (up to date)"
-  CLAUDE_SRI=$(get_current_sha256 "claude-code")
+  CLAUDE_SRI="$CURRENT_CLAUDE_SHA"
   UPDATED_CLAUDE=false
 else
-  echo "$CURRENT_CLAUDE -> $CLAUDE_VERSION (updating...)"
+  if [ "$CLAUDE_VERSION" = "$CURRENT_CLAUDE" ]; then
+    echo "$CLAUDE_VERSION (missing hash, recomputing...)"
+  else
+    echo "$CURRENT_CLAUDE -> $CLAUDE_VERSION (updating...)"
+  fi
   CLAUDE_URL="$CLAUDE_GCS/$CLAUDE_VERSION/linux-arm64/claude"
-  CLAUDE_SHA256=$(nix-prefetch-url "$CLAUDE_URL" 2>/dev/null)
-  CLAUDE_SRI=$(nix hash to-sri --type sha256 "$CLAUDE_SHA256" 2>/dev/null)
+  CLAUDE_SRI=$(get_file_sri "$CLAUDE_URL")
   UPDATED_CLAUDE=true
 fi
 
 # OpenCode
 echo -n "  opencode: "
 OPENCODE_VERSION=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-if [ "$OPENCODE_VERSION" = "$CURRENT_OPENCODE" ]; then
+if [ "$OPENCODE_VERSION" = "$CURRENT_OPENCODE" ] && has_sha256 "$CURRENT_OPENCODE_SHA"; then
   echo "$OPENCODE_VERSION (up to date)"
-  OPENCODE_SRI=$(get_current_sha256 "opencode")
+  OPENCODE_SRI="$CURRENT_OPENCODE_SHA"
   UPDATED_OPENCODE=false
 else
-  echo "$CURRENT_OPENCODE -> $OPENCODE_VERSION (updating...)"
+  if [ "$OPENCODE_VERSION" = "$CURRENT_OPENCODE" ]; then
+    echo "$OPENCODE_VERSION (missing hash, recomputing...)"
+  else
+    echo "$CURRENT_OPENCODE -> $OPENCODE_VERSION (updating...)"
+  fi
   OPENCODE_URL="https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz"
-  OPENCODE_SHA256=$(nix-prefetch-url "$OPENCODE_URL" 2>/dev/null)
-  OPENCODE_SRI=$(nix hash to-sri --type sha256 "$OPENCODE_SHA256" 2>/dev/null)
+  OPENCODE_SRI=$(get_file_sri "$OPENCODE_URL")
   UPDATED_OPENCODE=true
 fi
 
 # Pi
 echo -n "  pi: "
 PI_VERSION=$(curl -s https://api.github.com/repos/badlogic/pi-mono/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-if [ "$PI_VERSION" = "$CURRENT_PI" ]; then
+if [ "$PI_VERSION" = "$CURRENT_PI" ] && has_sha256 "$CURRENT_PI_SHA"; then
   echo "$PI_VERSION (up to date)"
-  PI_SRI=$(get_current_sha256 "pi")
+  PI_SRI="$CURRENT_PI_SHA"
   UPDATED_PI=false
 else
-  echo "$CURRENT_PI -> $PI_VERSION (updating...)"
+  if [ "$PI_VERSION" = "$CURRENT_PI" ]; then
+    echo "$PI_VERSION (missing hash, recomputing...)"
+  else
+    echo "$CURRENT_PI -> $PI_VERSION (updating...)"
+  fi
   PI_URL="https://github.com/badlogic/pi-mono/releases/download/v${PI_VERSION}/pi-linux-arm64.tar.gz"
   PI_SRI=$(get_fetchzip_hash "$PI_URL")
   UPDATED_PI=true

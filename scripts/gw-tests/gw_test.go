@@ -489,6 +489,49 @@ func TestNewCopiesEnvAndPiAndRegeneratesBranchHash(t *testing.T) {
 	}
 }
 
+func TestNewDoesNotCopyNodeModules(t *testing.T) {
+	f := newRepoFixture(t)
+
+	mustWriteFile(t, filepath.Join(f.Main, "node_modules", "pkg", "index.js"), "module\n")
+	cpalMarker := filepath.Join(f.Root, "cpal-called")
+	f.writeStub(t, "cpal", "#!/usr/bin/env bash\nset -euo pipefail\ntouch \""+cpalMarker+"\"\nmkdir -p \"$2/copied\"\n")
+
+	res := f.gw(t, f.Main, "", map[string]string{"GW_USER": "copy"}, "new", "no-node-modules")
+	requireSuccess(t, res)
+
+	wt := parseWorktreePathFromOutput(t, res.combined())
+	if _, err := os.Stat(filepath.Join(wt, "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("expected node_modules not to be copied, stat err=%v", err)
+	}
+	if _, err := os.Stat(cpalMarker); !os.IsNotExist(err) {
+		t.Fatalf("cpal should not be called, stat err=%v", err)
+	}
+	if strings.Contains(res.combined(), "node_modules") || strings.Contains(res.combined(), "cpal") {
+		t.Fatalf("expected no node_modules/cpal copy logs, got:\n%s", res.combined())
+	}
+}
+
+func TestNewFromLinkedWorktreeCopiesPiFromBaseRepo(t *testing.T) {
+	f := newRepoFixture(t)
+
+	mustWriteFile(t, filepath.Join(f.Main, ".pi", "settings.json"), "base repo pi\n")
+
+	first := f.gw(t, f.Main, "", map[string]string{"GW_USER": "copy"}, "new", "source-worktree")
+	requireSuccess(t, first)
+	firstWt := parseWorktreePathFromOutput(t, first.combined())
+
+	mustWriteFile(t, filepath.Join(firstWt, ".pi", "settings.json"), "linked worktree pi\n")
+
+	second := f.gw(t, firstWt, "", map[string]string{"GW_USER": "copy"}, "new", "from-linked")
+	requireSuccess(t, second)
+	secondWt := parseWorktreePathFromOutput(t, second.combined())
+
+	got := mustReadFile(t, filepath.Join(secondWt, ".pi", "settings.json"))
+	if got != "base repo pi\n" {
+		t.Fatalf("expected .pi copied from base repo, got %q", got)
+	}
+}
+
 func TestDeleteSafetyAndAbort(t *testing.T) {
 	f := newRepoFixture(t)
 
@@ -575,6 +618,9 @@ func TestListShowsGoldenAndDirty(t *testing.T) {
 	}
 	if !strings.Contains(out, "main--topic") {
 		t.Fatalf("expected worktree name in list output:\n%s", out)
+	}
+	if !strings.Contains(out, "[git]") {
+		t.Fatalf("expected plain worktree type marker in list output:\n%s", out)
 	}
 	if !strings.Contains(out, "[dirty]") {
 		t.Fatalf("expected dirty marker in list output:\n%s", out)

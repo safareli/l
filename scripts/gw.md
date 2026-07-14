@@ -196,7 +196,8 @@ If overlay-mounted:
 
 Shows all worktrees with annotations:
 
-- `[golden]`
+- `[golden]` for the base repo
+- `[git]` for plain linked worktrees
 - `[overlay:sudo SIZE]` or `[overlay:sudoless SIZE]`
 - `[dirty]` when git status is non-empty
 
