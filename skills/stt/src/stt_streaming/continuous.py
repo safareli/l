@@ -14,7 +14,7 @@ Silence detection uses RMS energy on small sub-chunks (100ms windows),
 regardless of how audio is batched by the WebSocket processor.
 
 Two-pass refinement (optional): when enabled, raw PCM audio is buffered
-alongside streaming. After an utterance boundary (2s silence or 30s max),
+alongside streaming. After an utterance boundary (1s silence or 30s max),
 the buffered audio is sent to Parakeet TDT for higher-quality offline
 transcription. The refined text replaces the streaming segments in-place.
 """
@@ -98,7 +98,7 @@ DEFAULT_MAX_SEGMENT_MS = 60_000       # Force boundary after this duration (0 = 
 DEFAULT_COMMIT_TIMEOUT_MS = 1000      # Force-commit deferred boundary after this much silence
 
 # Refinement (two-pass) defaults
-DEFAULT_REFINEMENT_SILENCE_MS = 2000   # Trigger refinement after 2s silence (utterance end)
+DEFAULT_REFINEMENT_SILENCE_MS = 1000   # Trigger refinement after 1s silence (utterance end)
 DEFAULT_REFINEMENT_MAX_MS = 30_000     # Force-refine after 30s of audio (~960KB PCM)
 
 # Sub-chunk size for energy analysis (100ms = 1600 samples = 3200 bytes)
@@ -161,7 +161,7 @@ class ContinuousSession:
         # Separate silence counter for refinement — not affected by
         # segment boundary logic which resets _silence_ms at 400ms.
         # Tracks consecutive silence since last speech, used to detect
-        # utterance boundaries (2s silence).
+        # utterance boundaries (1s silence).
         self._refinement_cont_silence_ms: float = 0.0
         # Audio split tracking: record the chunk index in
         # _refinement_audio_chunks at each segment boundary trigger.
@@ -235,7 +235,7 @@ class ContinuousSession:
         per-segment text by stripping the prefix.
 
         When refinement is enabled, RefinementRequest is emitted after
-        utterance boundaries (2s silence or 30s max audio). The caller
+        utterance boundaries (1s silence or 30s max audio). The caller
         should dispatch these asynchronously to Parakeet.
         """
         results: list[Partial | Final | RefinementRequest] = []
@@ -327,7 +327,7 @@ class ContinuousSession:
             # Check for refinement trigger.
             # Runs every sub-chunk (not just after Finals) because the
             # silence-based trigger needs to fire DURING silence — after
-            # the last Final was emitted and 2s of silence accumulated.
+            # the last Final was emitted and 1s of silence accumulated.
             # The check itself requires at least one finalized segment
             # in the current refinement group (seq > seq_start).
             if self._refine and self._seq > self._refinement_seq_start:

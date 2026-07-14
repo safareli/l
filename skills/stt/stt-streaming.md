@@ -112,8 +112,9 @@ ONNX models are saved to `~/.cache/stt-streaming-onnx/<lang>/`. The export needs
 --host HOST              Bind host (default: 0.0.0.0)
 --port PORT              Bind port (default: 6771)
 --langs LANGS            Comma-separated: en, ka (default: en)
---att-context-size L,R   EN model attention context (default: 70,0 = 0ms)
-                         Options: 70,0 (0ms) / 70,1 (80ms) / 70,6 (480ms) / 70,13 (1040ms)
+--att-context-size L,R   EN model attention context (default: 70,1 = 80ms)
+                         Options: 70,0 (0ms) / 70,1 (80ms)
+                         Note: in ONNX mode this is baked at export time.
 --threads N              CPU threads for inference (default: 4)
                          For batch_size=1 streaming, 2-4 is usually optimal.
                          Using all CPU cores causes synchronization overhead.
@@ -142,9 +143,18 @@ ws://host:port/stream?lang=en
 ws://host:port/stream?lang=ka
 ws://host:port/stream?lang=en&continuous=true
 ws://host:port/stream?lang=en&continuous=true&silence_ms=800&max_segment_ms=60000
+ws://host:port/stream?lang=en&continuous=true&refine=true&refinement_silence_ms=1000
+ws://host:port/stream?lang=en&continuous=true&refine=true&refine_with_context=true&refine_left_s=10&refine_right_s=5
+ws://host:port/stream?lang=en&continuous=true&rolling_refine=true&rolling_chunk_ms=2000&rolling_left_s=10&rolling_right_s=5
 ```
 
-Language is specified as a query parameter. Client specifies the language upfront — the server needs to know which model to use before audio arrives. Add `continuous=true` for auto-segmented long-running streams (see Continuous mode below).
+Language is specified as a query parameter. Client specifies the language upfront — the server needs to know which model to use before audio arrives. Add `continuous=true` for auto-segmented long-running streams (see Continuous mode below). For two-pass refinement, use `refine=true`; default `refinement_silence_ms` is 1000ms. Parakeet refinement and `parakeet_only` run **in-process** (no separate HTTP parakeet server required).
+
+`refine_with_context=true` keeps legacy seq-based `refined` events but transcribes each silence chunk with extra context (left/right window) before extracting the center text. This reduces split-word artifacts while preserving existing client logic.
+
+`rolling_refine=true` enables chunk-keyed timeline patches for deterministic UI updates:
+- `live_chunk` events: low-latency provisional text by `chunk_id`
+- `refined_chunk` events: Parakeet replacements for the same `chunk_id`
 
 ### Client → Server
 
@@ -161,6 +171,9 @@ Language is specified as a query parameter. Client specifies the language upfron
 | `{"type":"ready","lang":"en","continuous":false,"sample_rate":16000,"encoding":"pcm_s16le","channels":1}` | Session initialized, ready to receive audio. |
 | `{"type":"partial","text":"hello wor"}` | Interim transcription. Sent after each model chunk is processed. The text grows incrementally as more audio arrives. May update/correct earlier words. In continuous mode, includes `"seq":N`. |
 | `{"type":"final","text":"hello world."}` | Final transcription after `{"type":"end"}` signal or silence boundary (continuous mode). In continuous mode, includes `"seq":N`. |
+| `{"type":"live_chunk","chunk_id":12,"start_ms":24000,"end_ms":26000,"text":"..."}` | Provisional low-latency text slice for a fixed timeline chunk (`rolling_refine=true`). |
+| `{"type":"refined_chunk","chunk_id":12,"start_ms":24000,"end_ms":26000,"text":"..."}` | Parakeet replacement patch for that same timeline chunk (`rolling_refine=true`). |
+| `{"type":"rolling_done"}` | All pending rolling refinement chunks have been emitted after `{"type":"end"}`. |
 | `{"type":"error","message":"..."}` | Error message. |
 
 ### Audio format
@@ -295,6 +308,14 @@ ws://host:port/stream?lang=en&continuous=true&silence_ms=800&max_segment_ms=6000
 | `continuous` | `false` | Enable auto-segmentation |
 | `silence_ms` | `800` | Silence duration (ms) to trigger segment boundary |
 | `max_segment_ms` | `60000` | Force boundary after this duration (0 = disabled) |
+| `refine` | `false` | Emit seq-based refinement messages (`type=refined`) |
+| `refine_with_context` | `false` | For seq-based refine, add left/right context then extract center text |
+| `refine_left_s` | `10` | Left context seconds for `refine_with_context` |
+| `refine_right_s` | `5` | Right context seconds for `refine_with_context` |
+| `rolling_refine` | `false` | Enable chunk-keyed live/refined patch stream (EN only) |
+| `rolling_chunk_ms` | `2000` | Timeline chunk size for `live_chunk` / `refined_chunk` ids |
+| `rolling_left_s` | `10` | Left context seconds for Parakeet rolling windows |
+| `rolling_right_s` | `5` | Right context seconds for Parakeet rolling windows |
 
 **Protocol with `seq` counters:**
 
@@ -307,6 +328,17 @@ ws://host:port/stream?lang=en&continuous=true&silence_ms=800&max_segment_ms=6000
 ```
 
 Finals are emitted automatically when silence exceeds the threshold. The client still sends `{"type":"end"}` to flush the last segment when done.
+
+With `rolling_refine=true`, you also receive deterministic timeline patches:
+
+```json
+{"type":"live_chunk",    "chunk_id":0, "start_ms":0,    "end_ms":2000, "text":"hey how are"}
+{"type":"refined_chunk", "chunk_id":0, "start_ms":0,    "end_ms":2000, "text":"Hey"}
+{"type":"live_chunk",    "chunk_id":1, "start_ms":2000, "end_ms":4000, "text":"you today"}
+{"type":"refined_chunk", "chunk_id":1, "start_ms":2000, "end_ms":4000, "text":"how are you today"}
+```
+
+Apply updates by `chunk_id` (or `start_ms/end_ms`), not by string matching.
 
 **How it works:**
 

@@ -5,6 +5,7 @@ Uses the onnx_asr library for preprocessing, encoder, and TDT decoding.
 600M parameters, INT8 quantized (~652MB), ~30x real-time on CPU.
 """
 
+import re
 import sys
 import time
 
@@ -18,6 +19,7 @@ def _log(msg: str) -> None:
 
 
 MODEL_ID = "nemo-parakeet-tdt-0.6b-v2"
+_DECODE_SPACE_PATTERN = re.compile(r"\A\s|\s\B|(\s)\b")
 
 
 class ParakeetTranscriber:
@@ -39,9 +41,16 @@ class ParakeetTranscriber:
             providers=["CPUExecutionProvider"],
             sess_options=sess_options,
         )
+        # Timestamp-capable adapter for rolling chunk refinement.
+        self._model_ts = self._model.with_timestamps()
 
         elapsed = time.monotonic() - t0
         _log(f"Model loaded in {elapsed:.1f}s")
+
+    @staticmethod
+    def decode_tokens(tokens: list[str]) -> str:
+        """Decode token pieces to human-readable text."""
+        return re.sub(_DECODE_SPACE_PATTERN, lambda x: " " if x.group(1) else "", "".join(tokens)).strip()
 
     def transcribe_pcm(self, pcm_bytes: bytes) -> dict:
         """Transcribe raw 16kHz mono 16-bit PCM bytes.
@@ -58,6 +67,29 @@ class ParakeetTranscriber:
 
         return {
             "text": text or "",
+            "duration_s": round(duration_s, 2),
+            "elapsed_s": round(elapsed_s, 3),
+            "rtf": round(elapsed_s / duration_s, 4) if duration_s > 0 else 0,
+            "model": "parakeet-tdt-0.6b-v2",
+        }
+
+    def transcribe_pcm_with_timestamps(self, pcm_bytes: bytes) -> dict:
+        """Transcribe PCM and return token-level timestamps for center-chunk filtering."""
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        duration_s = len(samples) / 16000.0
+
+        t0 = time.monotonic()
+        result = self._model_ts.recognize(samples, sample_rate=16000)
+        elapsed_s = time.monotonic() - t0
+
+        tokens = list(result.tokens or [])
+        timestamps = [float(x) for x in (result.timestamps or [])]
+        text = result.text or self.decode_tokens(tokens)
+
+        return {
+            "text": text,
+            "tokens": tokens,
+            "timestamps": timestamps,
             "duration_s": round(duration_s, 2),
             "elapsed_s": round(elapsed_s, 3),
             "rtf": round(elapsed_s / duration_s, 4) if duration_s > 0 else 0,

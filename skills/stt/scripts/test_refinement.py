@@ -27,8 +27,8 @@ def main():
                         help="Audio chunk size in ms (default: 100)")
     parser.add_argument("--silence-ms", type=int, default=400,
                         help="Segment boundary silence (default: 400)")
-    parser.add_argument("--refinement-silence-ms", type=int, default=2000,
-                        help="Refinement trigger silence (default: 2000)")
+    parser.add_argument("--refinement-silence-ms", type=int, default=1000,
+                        help="Refinement trigger silence (default: 1000)")
     parser.add_argument("--refinement-max-ms", type=int, default=30000,
                         help="Max audio before forced refinement (default: 30000)")
     parser.add_argument("--pace", type=float, default=2.0,

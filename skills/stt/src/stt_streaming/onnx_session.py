@@ -100,6 +100,25 @@ def load_onnx_sessions(
             _log(f"  Re-export ONNX models to generate it.")
             continue
 
+        if lang == "en" and att_context_size_en:
+            requested_ctx = [int(x) for x in att_context_size_en]
+            exported_ctx = metadata.get("att_context_size")
+            if exported_ctx is not None:
+                exported_ctx = [int(x) for x in exported_ctx]
+            if exported_ctx is None:
+                _log("NOTE: ONNX metadata has no att_context_size (old export).")
+                _log("  In ONNX mode, --att-context-size is baked into exported models.")
+                _log("  Re-export EN model if you need a specific att-context size.")
+            elif exported_ctx != requested_ctx:
+                _log(
+                    f"WARNING: requested EN att-context {requested_ctx}, but ONNX export is {exported_ctx}."
+                )
+                _log("  In ONNX mode, --att-context-size is baked into exported models.")
+                _log(
+                    "  Re-export: uv run --python python3.11 python scripts/export_onnx.py "
+                    f"--langs en --att-context-size {requested_ctx[0]},{requested_ctx[1]}"
+                )
+
         _log(f"Loading ONNX sessions for {lang}...")
         t0 = time.monotonic()
 
@@ -129,6 +148,14 @@ def load_onnx_sessions(
         # Load mel filterbank
         filterbank = np.load(filterbank_path)
         _log(f"  Mel filterbank: {filterbank.shape}")
+
+        stream_cfg = metadata.get("streaming_cfg", {})
+        _log(
+            "  Streaming cfg: "
+            f"chunk_size={stream_cfg.get('chunk_size')} "
+            f"shift_size={stream_cfg.get('shift_size')} "
+            f"pre_encode_cache={stream_cfg.get('pre_encode_cache_size')}"
+        )
 
         sessions[lang] = {
             "encoder": enc_sess,
@@ -219,17 +246,20 @@ class OnnxSession:
     """
 
     SAMPLE_RATE = 16000
-    MIN_PREPROCESS_MS = 100
-    MIN_PREPROCESS_SAMPLES = SAMPLE_RATE * MIN_PREPROCESS_MS // 1000  # 1600
+    # Default raw PCM aggregation before mel extraction/inference.
+    # Can be overridden per connection via OnnxSession(..., min_preprocess_ms=...).
+    MIN_PREPROCESS_MS = 650
+    MIN_PREPROCESS_SAMPLES = SAMPLE_RATE * MIN_PREPROCESS_MS // 1000  # 10400
     MIN_PREPROCESS_BYTES = MIN_PREPROCESS_SAMPLES * 2
     FLUSH_PAD_MS = 560
     FLUSH_PAD_SAMPLES = SAMPLE_RATE * FLUSH_PAD_MS // 1000
 
-    def __init__(self, session_data: dict, lang: str):
+    def __init__(self, session_data: dict, lang: str, min_preprocess_ms: int | None = None):
         """
         Args:
             session_data: dict with keys "encoder", "decoder_joint", "metadata", "filterbank"
             lang: language code
+            min_preprocess_ms: optional PCM aggregation threshold per session
         """
         self.encoder_sess = session_data["encoder"]
         self.decoder_joint_sess = session_data["decoder_joint"]
@@ -244,6 +274,12 @@ class OnnxSession:
 
         # Raw PCM accumulator
         self.pcm_buffer = bytearray()
+
+        # Per-session PCM aggregation threshold (tradeoff: latency vs stability).
+        if min_preprocess_ms is None:
+            min_preprocess_ms = self.MIN_PREPROCESS_MS
+        self.min_preprocess_ms = max(50, int(min_preprocess_ms))
+        self.min_preprocess_bytes = (self.SAMPLE_RATE * self.min_preprocess_ms // 1000) * 2
 
         # Lightweight mel preprocessor (numpy only)
         preprocessor = MelPreprocessor(
@@ -287,7 +323,7 @@ class OnnxSession:
         """
         self.pcm_buffer.extend(pcm_int16_bytes)
 
-        if len(self.pcm_buffer) < self.MIN_PREPROCESS_BYTES:
+        if len(self.pcm_buffer) < self.min_preprocess_bytes:
             return []
 
         audio = (

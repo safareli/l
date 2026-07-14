@@ -41,7 +41,7 @@ STREAMING_MODELS = {
     # "ka": "nvidia/stt_ka_fastconformer_hybrid_transducer_ctc_large_streaming_80ms_pc",  # TODO
 }
 
-DEFAULT_ATT_CONTEXT_SIZE_EN = [70, 0]
+DEFAULT_ATT_CONTEXT_SIZE_EN = [70, 1]
 CACHE_BASE_DIR = os.path.expanduser("~/.cache/stt-streaming-onnx")
 
 # Metadata version — bump when adding new required fields.
@@ -210,6 +210,9 @@ def export_lang(lang: str, att_context_size_en=None):
         "version": METADATA_VERSION,
         "lang": lang,
         "model_name": model_name,
+        "att_context_size": (
+            [int(x) for x in att_context_size_en] if (lang == "en" and att_context_size_en) else None
+        ),
         "blank_id": int(blank_id),
         "vocab_size": len(vocab),
         "vocab": vocab,
@@ -237,10 +240,9 @@ def export_lang(lang: str, att_context_size_en=None):
     # Export ONNX
     # -----------------------------------------------------------------------
 
-    # Keep native drop_extra_pre_encoded (=2 for 0ms look-ahead).
-    # The ONNX graph bakes in the drop=2 slice, so step 0 (1 mel frame →
-    # too few subsampled frames after drop) must be skipped at runtime.
-    # The runtime OnnxSession skips step 0 to handle this.
+    # Keep native drop_extra_pre_encoded from model config.
+    # The ONNX graph bakes this slice in. For very short step-0 chunks,
+    # runtime may need to skip the first step (handled in OnnxSession).
     print(f"  drop_extra_pre_encoded={cfg.drop_extra_pre_encoded} (native, baked into ONNX)", file=sys.stderr)
 
     print(f"  Configuring export with cache_support=True...", file=sys.stderr)
@@ -299,8 +301,8 @@ def main():
     )
     parser.add_argument(
         "--att-context-size",
-        default="70,0",
-        help="Attention context size for EN model as 'left,right' (default: 70,0 = 0ms look-ahead)",
+        default="70,1",
+        help="Attention context size for EN model as 'left,right' (default: 70,1 = 80ms look-ahead)",
     )
     args = parser.parse_args()
 

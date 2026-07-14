@@ -79,7 +79,7 @@ Audio ──WebSocket──►       │                                      �
                            │  │  - Buffers PCM audio        │      │
                            │  │  - Groups segments          │      │
                            │  │  - Detects utterance end    │      │
-                           │  │    (2s silence OR 30s max)  │      │
+                           │  │    (1s silence OR 30s max)  │      │
                            │  │                             │      │
                            │  │  On trigger:                │      │
                            │  │  ┌─────────────────────┐    │      │
@@ -129,7 +129,7 @@ self._refinement_pending: bool = False              # waiting for Parakeet respo
 
 #### Configuration
 ```python
-REFINEMENT_SILENCE_MS = 2000    # trigger refinement after 2s of silence
+REFINEMENT_SILENCE_MS = 1000    # trigger refinement after 1s of silence
 REFINEMENT_MAX_AUDIO_MS = 30000 # force-refine after 30s of audio (~960KB PCM)
 ```
 
@@ -139,7 +139,7 @@ The two thresholds serve different purposes:
 | Threshold | Default | Purpose | Triggers |
 |-----------|---------|---------|----------|
 | `silence_ms` | 400ms | Streaming segment boundary | `Final` message |
-| `refinement_silence_ms` | 2000ms | Utterance end (thought boundary) | `refined` message (batched) |
+| `refinement_silence_ms` | 1000ms | Utterance end (thought boundary) | `refined` message (batched) |
 | `refinement_max_ms` | 30000ms | Long speech without pauses | `refined` at next `Final` |
 
 The refinement trigger **always waits for a streaming segment boundary** first.
@@ -163,7 +163,7 @@ mid-segment. The silence thresholds work in layers:
 ```
 Speech → 400ms silence → streaming segment Final → more speech → 400ms silence → Final
                                                                                     │
-         2s total silence (no new segment Finals) ──────────────────────────────────►│
+         1s total silence (no new segment Finals) ──────────────────────────────────►│
                                                                                     ▼
                                                                             Refinement trigger
                                                                             (covers all Finals
@@ -321,7 +321,7 @@ Optionally show the refinement latency below each refined block:
 
 New params when `refine=true`:
 ```
-ws://host:6771/stream?lang=en&continuous=true&silence_ms=400&refine=true&refinement_silence_ms=2000&refinement_max_ms=30000
+ws://host:6771/stream?lang=en&continuous=true&silence_ms=400&refine=true&refinement_silence_ms=1000&refinement_max_ms=30000
 ```
 
 ## Implementation Steps
@@ -333,7 +333,7 @@ ws://host:6771/stream?lang=en&continuous=true&silence_ms=400&refine=true&refinem
    - Append every PCM chunk to `_refinement_audio_chunks`
    - Track `_refinement_audio_ms`
 3. [x] Add utterance-end detection (separate from 400ms segment boundary)
-   - 2s silence threshold after speech
+   - 1s silence threshold after speech
    - 30s max duration fallback
 4. [x] Emit `RefinementRequest` when triggered
 5. [x] Add WAV assembly helper (PCM chunks → in-memory WAV bytes)
@@ -360,7 +360,7 @@ ws://host:6771/stream?lang=en&continuous=true&silence_ms=400&refine=true&refinem
 17. [ ] Test real-time with microphone (verify no flicker/jump on refinement)
 18. [ ] Test edge cases: rapid speech (no long pauses), very long pauses
 19. [ ] Test Parakeet server restart during streaming
-20. [ ] Tune thresholds: refinement_silence_ms (2000?), max_ms (30000?)
+20. [ ] Tune thresholds: refinement_silence_ms (1000?), max_ms (30000?)
 
 ## Memory & Performance Budget
 
