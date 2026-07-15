@@ -185,6 +185,10 @@ HOSTS_EOF
         wget -qO- https://tailscale.com/install.sh | sh
       fi
 
+      echo "==> Setting Tailscale operator to current user..."
+      # Allows running tailscale commands (e.g. tailscale cert) without sudo.
+      sudo tailscale set --operator="$USER"
+
       echo "==> Installing Nix dependencies..."
       apt-get update && apt-get install -y xz-utils
 

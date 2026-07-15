@@ -1,264 +1,455 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-# Worktree management script
-# Usage:
-#   w n <name>           - Create new worktree with branch
-#   w n <name> <prompt>  - Create worktree and launch AI agent with prompt
-#   w d [name]           - Delete current or named worktree
+GW_START_MS=$(date +%s%3N)
 
-# Helper to signal cd to wrapper (or print if no wrapper)
+show_help() {
+    cat << 'EOF'
+Git worktree manager (sibling worktrees only)
+
+Usage:
+  gw new <name>          Create new worktree from origin/main
+  gw fork <name>         Create new worktree from current HEAD
+  gw delete [name]       Delete current worktree (or named one)
+  gw list                List all worktrees
+  gw shell-hook <shell>  Print shell wrapper (add to .zshrc/.bashrc)
+  gw help                Show this help
+
+Aliases:
+  n=new, f=fork, d=delete, l=list, h=help
+
+Shell integration:
+  eval "$(gw shell-hook zsh)"    # add to .zshrc
+  eval "$(gw shell-hook bash)"   # add to .bashrc
+
+Plain git worktrees are always used.
+
+Environment:
+  GW_USER            Username prefix for new branches (default: $USER)
+  GW_EVAL_FILE       If set, gw writes shell commands for the wrapper to eval
+
+Examples:
+  gw new feature-auth                # branch: $USER/YYYY-MM-DD-feature-auth
+  gw fork split-current-task         # fork from current HEAD
+  gw delete
+EOF
+}
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+log() {
+    local elapsed_ms=$(( $(date +%s%3N) - GW_START_MS ))
+    printf '[%02d.%03ds] %s\n' "$((elapsed_ms / 1000))" "$((elapsed_ms % 1000))" "$*"
+}
+
+signal_eval() {
+    if [ -n "${GW_EVAL_FILE:-}" ]; then
+        printf '%s\n' "$1" >> "$GW_EVAL_FILE"
+    else
+        eval "$1"
+    fi
+}
+
 signal_cd() {
-    if [ -n "$GW_CD_FILE" ]; then
-        echo "$1" > "$GW_CD_FILE"
+    if [ -n "${GW_EVAL_FILE:-}" ]; then
+        signal_eval "cd $(printf '%q' "$1")"
     else
         echo "  cd $1"
     fi
 }
 
-show_help() {
-    cat << 'EOF'
-Git worktree management tool
-
-Usage:
-  gw n <name>              Create new worktree with branch $GW_USER/YYYY-MM-DD-<name>
-  gw n <name> "<prompt>"   Create worktree and launch AI agent with prompt
-  gw d [name]              Delete current worktree (or named one)
-  gw l                     List all worktrees
-  gw h, --help             Show this help
-
-Environment:
-  GW_USER                  Username prefix for new branches (default: $USER)
-
-Examples:
-  gw n feature-auth
-  gw n bugfix-login "Fix the authentication bug in login.ts"
-  gw d
-  gw d feature-old
-EOF
-}
-
-# Get base directory name (strips --worktree suffix if present)
-get_base_name() {
-    local dir="$1"
-    if [[ "$dir" == *"--"* ]]; then
-        echo "${dir%%--*}"
-    else
-        echo "$dir"
-    fi
-}
-
-# Check if current worktree is the main one (no -- in name)
 is_main_worktree() {
     local git_root
     git_root=$(git rev-parse --show-toplevel)
-    local current_dir
-    current_dir=$(basename "$git_root")
-    [[ "$current_dir" != *"--"* ]]
+    # Main worktree has .git as a directory; linked worktrees have .git as a file
+    [ -d "$git_root/.git" ]
 }
 
-cmd_new() {
-    local name="$1"
-    local prompt="$2"
+resolve_base() {
+    local git_root
+    git_root=$(git rev-parse --show-toplevel)
+    local git_common_dir
+    git_common_dir=$(cd "$git_root" && git rev-parse --git-common-dir)
+    # git-common-dir may be relative to git_root; resolve to absolute
+    if [[ "$git_common_dir" != /* ]]; then
+        git_common_dir="${git_root}/${git_common_dir}"
+    fi
+    dirname "$git_common_dir"
+}
+
+run_install_quiet() {
+    local worktree_path="$1"
+    local manager="$2"
+    shift 2
+
+    if ! command -v "$manager" >/dev/null 2>&1; then
+        log "$manager not found, skipping install"
+        return 0
+    fi
+
+    log "Installing dependencies ($manager)..."
+    local log_file
+    log_file=$(mktemp -t "gw-${manager}-install-XXXXXX.log")
+
+    if (cd "$worktree_path" && "$@") >"$log_file" 2>&1; then
+        rm -f "$log_file"
+        log "Dependencies installed ($manager)"
+    else
+        log "Install failed ($manager), log: $log_file"
+        tail -n 40 "$log_file" || true
+        return 1
+    fi
+}
+
+run_deps_install() {
+    local worktree_path="$1"
+    if [ -f "$worktree_path/pnpm-lock.yaml" ]; then
+        run_install_quiet "$worktree_path" "pnpm" pnpm install
+    elif [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
+        run_install_quiet "$worktree_path" "bun" bun install
+    elif [ -f "$worktree_path/package-lock.json" ]; then
+        run_install_quiet "$worktree_path" "npm" npm install
+    fi
+}
+
+print_available_worktrees() {
+    git worktree list --porcelain | while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_name
+            wt_name=$(basename "${line#worktree }")
+            local printed=false
+        elif [[ "$line" == "branch refs/heads/"* ]]; then
+            printf "  %-40s %s\n" "$wt_name" "[${line#branch refs/heads/}]"
+            printed=true
+        elif [[ "$line" == "" ]] && [ "${printed:-false}" = false ] && [ -n "${wt_name:-}" ]; then
+            printf "  %-40s %s\n" "$wt_name" "(detached)"
+        fi
+    done
+}
+
+# ── Commands ─────────────────────────────────────────────────────────
+
+cmd_create_from_base() {
+    local base_ref="$1"
+    local mode_name="$2"
+    shift 2
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -s|-f)
+                echo "Error: overlay worktrees have been removed. Use 'gw ${mode_name} <name>' for a plain git worktree."
+                exit 1
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                echo "Usage: gw ${mode_name} <name>"
+                exit 1
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    local name="${1:-}"
 
     if [ -z "$name" ]; then
         echo "Error: Branch name required"
-        echo "Usage: gw n <name> [prompt]"
+        echo "Usage: gw ${mode_name} <name>"
         exit 1
     fi
 
-    # Get git root directory
-    local git_root
-    git_root=$(git rev-parse --show-toplevel)
-    local current_dir
-    current_dir=$(basename "$git_root")
+    if [ "$#" -gt 1 ]; then
+        echo "Error: gw ${mode_name} accepts only one argument"
+        echo "Usage: gw ${mode_name} <name>"
+        exit 1
+    fi
 
-    # Extract base name (part before first --)
+    local base_dir
+    base_dir=$(resolve_base)
+
     local base_name
-    base_name=$(get_base_name "$current_dir")
+    base_name=$(basename "$base_dir")
+
+    local parent_dir
+    parent_dir=$(dirname "$base_dir")
 
     local branch_name
-    local worktree_dir
-    local is_existing_branch=false
+    local is_existing_local=false
+    local is_existing_remote=false
 
-    # Check if branch already exists locally or on remote
     if git show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
-        # Branch exists locally
         branch_name="$name"
-        is_existing_branch=true
-        echo "Found existing local branch: $branch_name"
-    elif git ls-remote --heads origin "$name" 2>/dev/null | grep -q .; then
-        # Branch exists on remote
+        is_existing_local=true
+    elif git show-ref --verify --quiet "refs/remotes/origin/$name" 2>/dev/null; then
         branch_name="$name"
-        is_existing_branch=true
-        echo "Found existing remote branch: $branch_name"
-        # Fetch the branch
-        git fetch origin "$name"
+        is_existing_remote=true
     else
-        # Create new branch with date prefix
-        local with_date
-        with_date="$(date +%Y-%m-%d)-$name"
-        branch_name="${GW_USER:-$USER}/$with_date"
+        branch_name="${GW_USER:-$USER}/$(date +%Y-%m-%d)-$name"
     fi
 
-    # Create worktree directory name (use branch name, replace / with -)
     local safe_branch_name="${branch_name//\//-}"
-    worktree_dir="${base_name}--${safe_branch_name}"
-    local worktree_path
-    worktree_path="$(dirname "$git_root")/$worktree_dir"
-
-    # Base directory (original repo without worktree suffix)
-    local base_dir
-    base_dir="$(dirname "$git_root")/$base_name"
+    local worktree_path="${parent_dir}/${base_name}--${safe_branch_name}"
 
     if [ -d "$worktree_path" ]; then
-        echo "Error: Directory $worktree_path already exists"
+        echo "Error: Directory already exists: $worktree_path"
         exit 1
     fi
 
-    echo "Creating worktree at: $worktree_path"
-    echo "Branch: $branch_name"
-
-    # Create worktree
-    if [ "$is_existing_branch" = true ]; then
-        # Use existing branch
-        git worktree add "$worktree_path" "$branch_name"
-    else
-        # Create new branch from main
-        git worktree add -b "$branch_name" "$worktree_path" main
+    # ── Ensure branch exists locally ────────────────────────────
+    if [ "$is_existing_remote" = true ] && [ "$is_existing_local" = false ]; then
+        git branch "$branch_name" "origin/$branch_name"
+    elif [ "$is_existing_local" = false ] && [ "$is_existing_remote" = false ]; then
+        git branch --no-track "$branch_name" "$base_ref"
     fi
 
-    # Allow direnv for the new worktree
-    echo "Allowing direnv for $worktree_path..."
-    direnv allow "$worktree_path"
+    # ── Create worktree ──────────────────────────────────────────
+    log "Creating worktree..."
+    git worktree add "$worktree_path" "$branch_name"
+    if [ -d "$base_dir/.pi" ] && [ ! -d "$worktree_path/.pi" ]; then
+        cp -r "$base_dir/.pi" "$worktree_path/.pi"
+    fi
+    run_deps_install "$worktree_path"
 
-    # Copy .env from base directory and modify it
+    # ── Common post-setup ────────────────────────────────────────
+    if command -v direnv >/dev/null 2>&1; then
+        direnv allow "$worktree_path" >/dev/null 2>&1 || true
+    fi
+
     if [ -f "$base_dir/.env" ]; then
-        echo "Copying .env from $base_dir..."
         cp "$base_dir/.env" "$worktree_path/.env"
-
-        # Remove any existing lines (use sed without -i '' for Linux)
         sed -i '/^BRANCH_HASH=/d' "$worktree_path/.env"
 
-        # Generate MD5 hash of branch name
         local branch_hash
-        branch_hash=$(echo -n "$branch_name" | md5sum | cut -c1-8)
+        branch_hash=$(printf '%s' "$branch_name" | md5sum | cut -c1-8)
 
-        # Append test database prefixes
         {
             echo ""
             echo "# Auto-generated for worktree isolation"
             echo "BRANCH_HASH=${branch_hash}"
         } >> "$worktree_path/.env"
-
-        echo "Added BRANCH_HASH=${branch_hash} to .env"
-    else
-        echo "Warning: No .env file found at $base_dir/.env"
     fi
 
-    # Run package manager install based on lock file
-    if [ -f "$worktree_path/pnpm-lock.yaml" ]; then
-        echo "Running pnpm install in $worktree_path..."
-        (cd "$worktree_path" && pnpm install)
-    elif [ -f "$worktree_path/bun.lockb" ] || [ -f "$worktree_path/bun.lock" ]; then
-        echo "Running bun install in $worktree_path..."
-        (cd "$worktree_path" && bun install)
-    elif [ -f "$worktree_path/package-lock.json" ]; then
-        echo "Running npm install in $worktree_path..."
-        (cd "$worktree_path" && npm install)
-    fi
-
-    echo ""
-    echo "Worktree created successfully!"
-
-    # If prompt provided, launch AI agent
-    if [ -n "$prompt" ]; then
-        echo ""
-        echo "Launching AI agent with prompt..."
-        # Signal cd before exec (in case pi exits and wrapper resumes)
-        signal_cd "$worktree_path"
-        cd "$worktree_path"
-        exec pi "$prompt"
-    fi
+    log "Worktree ready: $worktree_path"
+    log "Branch: $branch_name"
 
     signal_cd "$worktree_path"
 }
 
+resolve_main_ref() {
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+        echo "origin/main"
+    elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+        echo "origin/master"
+    elif git rev-parse --verify main >/dev/null 2>&1; then
+        echo "main"
+    elif git rev-parse --verify master >/dev/null 2>&1; then
+        echo "master"
+    else
+        echo "HEAD"
+    fi
+}
+
+cmd_new() {
+    cmd_create_from_base "$(resolve_main_ref)" "new" "$@"
+}
+
+cmd_fork() {
+    cmd_create_from_base "HEAD" "fork" "$@"
+}
+
 cmd_delete() {
-    local name="$1"
+    local name="${1:-}"
+
+    if [ "$#" -gt 1 ]; then
+        echo "Usage: gw delete [name]"
+        exit 1
+    fi
+
     local git_root
     git_root=$(git rev-parse --show-toplevel)
-    local current_dir
-    current_dir=$(basename "$git_root")
+
+    local base_dir
+    base_dir=$(resolve_base)
+
     local base_name
-    base_name=$(get_base_name "$current_dir")
+    base_name=$(basename "$base_dir")
+
     local parent_dir
-    parent_dir=$(dirname "$git_root")
+    parent_dir=$(dirname "$base_dir")
 
     local worktree_path
 
     if [ -z "$name" ]; then
-        # Delete current worktree
         if is_main_worktree; then
-            echo "Error: Cannot delete main worktree. Use 'gw d <name>' to delete a specific worktree."
+            echo "Error: Cannot delete main worktree. Use 'gw delete <name>' to delete a specific worktree."
             exit 1
         fi
         worktree_path="$git_root"
     else
-        # Delete named worktree (exact match only)
-        worktree_path="$parent_dir/${base_name}--${name}"
+        # Try direct dir name, then slash→dash (branch name), then branch lookup
+        local safe_name="${name//\//-}"
+        worktree_path="$parent_dir/${base_name}--${safe_name}"
+
         if [ ! -d "$worktree_path" ]; then
-            echo "Error: Worktree '$name' not found at $worktree_path"
-            echo "Available worktrees:"
-            git worktree list
-            exit 1
+            local found=""
+            local wt=""
+            while IFS= read -r line; do
+                if [[ "$line" == "worktree "* ]]; then
+                    wt="${line#worktree }"
+                elif [[ "$line" == "branch refs/heads/"* ]]; then
+                    local br="${line#branch refs/heads/}"
+                    if [[ "$br" == "$name" ]]; then
+                        found="$wt"
+                        break
+                    fi
+                fi
+            done < <(git worktree list --porcelain)
+
+            if [ -n "$found" ]; then
+                worktree_path="$found"
+            else
+                echo "Error: Worktree '$name' not found"
+                echo "Available worktrees:"
+                print_available_worktrees
+                exit 1
+            fi
         fi
     fi
 
-    # Safety check - don't delete main
-    local target_dir
-    target_dir=$(basename "$worktree_path")
-    if [[ "$target_dir" != *"--"* ]]; then
+    if [ -d "$worktree_path/.git" ]; then
         echo "Error: Cannot delete main worktree"
         exit 1
     fi
 
     echo "Deleting worktree: $worktree_path"
-    read -p "Are you sure? (y/N) " -n 1 -r
+
+    local changes
+    changes=$(cd "$worktree_path" && git status --porcelain 2>/dev/null || true)
+    if [ -n "$changes" ]; then
+        echo "⚠ WARNING: Worktree has uncommitted changes:"
+        echo "$changes" | head -20
+        echo ""
+    fi
+
+    read -r -p "Are you sure? (y/N) " -n 1
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo "Aborted"
         exit 1
     fi
 
-    local cd_target="$parent_dir/$base_name"
+    if [ "$worktree_path" = "$git_root" ]; then
+        signal_cd "$base_dir"
+    fi
 
     git worktree remove "$worktree_path" --force
-    echo "Worktree deleted successfully!"
-
-    # Check if we're in the deleted worktree 
-    if [ "$worktree_path" = "$git_root" ]; then
-        # Signal to wrapper function to cd
-        signal_cd "$cd_target"
-    fi
+    echo "Worktree deleted"
 }
 
 cmd_list() {
-    git worktree list
+    echo "Worktrees:"
+    echo ""
+
+    local base_dir
+    base_dir=$(resolve_base)
+    local base_name
+    base_name=$(basename "$base_dir")
+
+    git worktree list --porcelain | while IFS= read -r line; do
+        if [[ "$line" == "worktree "* ]]; then
+            local wt_path="${line#worktree }"
+            local wt_name
+            wt_name=$(basename "$wt_path")
+
+            local branch_info=""
+            local dirty=""
+
+            branch_info=$(cd "$wt_path" 2>/dev/null && git branch --show-current 2>/dev/null || echo "(detached)")
+            [ -n "$branch_info" ] || branch_info="(detached)"
+
+            if [ -d "$wt_path" ]; then
+                local changes
+                changes=$(cd "$wt_path" 2>/dev/null && git status --porcelain 2>/dev/null | head -1 || true)
+                if [ -n "$changes" ]; then
+                    dirty=" [dirty]"
+                fi
+            fi
+
+            local type_label="[git]"
+            if [[ "$wt_name" == "$base_name" ]] && [ -d "$wt_path/.git" ]; then
+                type_label="[main]"
+            fi
+
+            printf "  %-40s %-10s %s%s\n" "$wt_name" "$type_label" "$branch_info" "$dirty"
+        fi
+    done
 }
 
-# Main command dispatch
+cmd_shell_hook() {
+    local shell="${1:-}"
+    local fallback_gw_bin
+    fallback_gw_bin=$(command -v gw 2>/dev/null || echo "gw")
+
+    case "$shell" in
+        zsh|bash)
+            cat << HOOK
+gw() {
+  local evalfile=\$(mktemp)
+  trap "rm -f \$evalfile" EXIT
+
+  # Prefer stable HM symlink so updates are picked up without re-hooking.
+  local gw_bin="\$HOME/.local/bin/gw"
+  [ -x "\$gw_bin" ] || gw_bin="$fallback_gw_bin"
+
+  GW_EVAL_FILE="\$evalfile" "\$gw_bin" "\$@"
+  local exit_code=\$?
+  [ -s "\$evalfile" ] && source "\$evalfile"
+  return \$exit_code
+}
+HOOK
+            ;;
+        "")
+            echo "Usage: gw shell-hook <shell>"
+            echo "Supported: zsh, bash"
+            echo ""
+            echo "Add to your rc file:"
+            echo '  eval "$(gw shell-hook zsh)"    # .zshrc'
+            echo '  eval "$(gw shell-hook bash)"   # .bashrc'
+            exit 1
+            ;;
+        *)
+            echo "Error: Unsupported shell '$shell'. Use 'zsh' or 'bash'."
+            exit 1
+            ;;
+    esac
+}
+
+# ── Main dispatch ────────────────────────────────────────────────────
+
 case "${1:-}" in
     n|new)
         shift
         cmd_new "$@"
+        ;;
+    f|fork)
+        shift
+        cmd_fork "$@"
         ;;
     d|delete|rm)
         shift
         cmd_delete "$@"
         ;;
     l|list|ls)
+        shift || true
         cmd_list
+        ;;
+    shell-hook|sh)
+        shift
+        cmd_shell_hook "$@"
         ;;
     h|help|--help|-h)
         show_help
